@@ -64,6 +64,7 @@ const emit = defineEmits([
   "component-placed",
   "select-component",
   "update-component-position",
+  "update-component-properties",
   "rename-component",
 ]);
 
@@ -93,6 +94,20 @@ const createComponentId = () => {
 const SMALL_GRID_SIZE = 6; // 小网格大小（像素）
 const GRID_RATIO = 6; // 一个大网格由 GRID_RATIO × GRID_RATIO 个小网格组成
 const LARGE_GRID_SIZE = SMALL_GRID_SIZE * GRID_RATIO; // 大网格大小（= 6×6 小网格）
+const RESIZABLE_COMPONENT_TYPES = new Set([
+  "workstation",
+  "parallelWorkstation",
+  "assemblyWorkstation",
+  "disassemblyWorkstation",
+  "buffer",
+]);
+const DEFAULT_COMPONENT_SHADOW_COLORS = {
+  workstation: "#dbeafe",
+  parallelWorkstation: "#dcfce7",
+  assemblyWorkstation: "#fef3c7",
+  disassemblyWorkstation: "#fce7f3",
+  buffer: "#ede9fe",
+};
 const INITIAL_GRID_COUNT = 60; // 初始大网格数量（横向和纵向）
 const EXPAND_THRESHOLD = 25; // 距离边缘多少个小网格时扩展画布
 
@@ -448,17 +463,13 @@ const drawOriginAxes = (ctx) => {
 };
 
 // 绘制已放置的控件
-// 先画连接线再画控件图标，保证线不会盖住图标
+// 先画控件，再画连接线，保证连接线显示在矩形区域之上
 const drawPlacedComponents = (ctx) => {
   // 标签包围盒每帧重算，避免控件删除/移动后留下过期的命中区域
   labelRects.clear();
 
-  props.placedComponents
-    .filter((component) => component.type === "connectionLine")
-    .forEach((line) => drawConnectionLine(ctx, line));
-
   props.placedComponents.forEach((component) => {
-    // 连接线已在上一轮绘制
+    // 连接线在所有控件绘制完成后统一绘制
     if (component.type === "connectionLine") {
       return;
     }
@@ -473,6 +484,15 @@ const drawPlacedComponents = (ctx) => {
     if (component.type === "node") {
       drawNodeComponent(ctx, component);
       return;
+    }
+
+    if (RESIZABLE_COMPONENT_TYPES.has(component.type)) {
+      const shadowColor = component.shadowColor || DEFAULT_COMPONENT_SHADOW_COLORS[component.type];
+      ctx.fillStyle = shadowColor;
+      ctx.fillRect(component.x, component.y, component.width, component.height);
+      ctx.strokeStyle = component.id === props.selectedId ? "#2566fd" : "rgba(100, 116, 139, 0.45)";
+      ctx.lineWidth = component.id === props.selectedId ? 2 : 1;
+      ctx.strokeRect(component.x, component.y, component.width, component.height);
     }
 
     // 选中的控件先绘制高亮底框
@@ -495,8 +515,8 @@ const drawPlacedComponents = (ctx) => {
       // 图片已加载，直接绘制
       ctx.drawImage(
         img,
-        component.x,
-        component.y,
+        component.x + (component.width - LARGE_GRID_SIZE) / 2,
+        component.y + (component.height - LARGE_GRID_SIZE) / 2,
         LARGE_GRID_SIZE,
         LARGE_GRID_SIZE,
       );
@@ -511,6 +531,11 @@ const drawPlacedComponents = (ctx) => {
     // 在图片下方绘制控件名称（如：输入1）
     drawComponentLabel(ctx, component);
   });
+
+  // 连接线置于控件矩形和图标之上，避免被设备类矩形遮挡
+  props.placedComponents
+    .filter((component) => component.type === "connectionLine")
+    .forEach((line) => drawConnectionLine(ctx, line));
 
   // 绘制临时连接线（连接线模式且已选中第一个控件）
   if (connectionLineMode.value && firstComponent.value && tempLineEnd.value) {
@@ -696,9 +721,24 @@ const resolveLineEndpoints = (line) => {
   const dirX = toCenterX - fromCenterX;
   const dirY = toCenterY - fromCenterY;
 
+  // 为图标定义更小的边界（图标是 LARGE_GRID_SIZE × LARGE_GRID_SIZE，居中于矩形）
+  const createIconBounds = (comp) => {
+    const iconX = comp.x + (comp.width - LARGE_GRID_SIZE) / 2;
+    const iconY = comp.y + (comp.height - LARGE_GRID_SIZE) / 2;
+    return {
+      x: iconX,
+      y: iconY,
+      width: LARGE_GRID_SIZE,
+      height: LARGE_GRID_SIZE,
+    };
+  };
+
+  const fromIcon = createIconBounds(fromComp);
+  const toIcon = createIconBounds(toComp);
+
   return {
-    start: clipToComponentEdge(fromComp, fromCenterX, fromCenterY, dirX, dirY),
-    end: clipToComponentEdge(toComp, toCenterX, toCenterY, -dirX, -dirY),
+    start: clipToComponentEdge(fromIcon, fromCenterX, fromCenterY, dirX, dirY),
+    end: clipToComponentEdge(toIcon, toCenterX, toCenterY, -dirX, -dirY),
   };
 };
 
@@ -759,9 +799,19 @@ const drawTempConnectionLine = (ctx) => {
   const fromCenterY = from.y + from.height / 2;
   const tip = { x: tempLineEnd.value.x, y: tempLineEnd.value.y };
 
+  // 为图标定义更小的边界（图标是 LARGE_GRID_SIZE × LARGE_GRID_SIZE，居中于矩形）
+  const fromIconX = from.x + (from.width - LARGE_GRID_SIZE) / 2;
+  const fromIconY = from.y + (from.height - LARGE_GRID_SIZE) / 2;
+  const fromIcon = {
+    x: fromIconX,
+    y: fromIconY,
+    width: LARGE_GRID_SIZE,
+    height: LARGE_GRID_SIZE,
+  };
+
   // 起点收缩到图标边缘；终点是鼠标位置，不收缩
   const start = clipToComponentEdge(
-    from,
+    fromIcon,
     fromCenterX,
     fromCenterY,
     tip.x - fromCenterX,
@@ -1701,6 +1751,7 @@ const handleMouseDown = async (e) => {
     y: finalY,
     width: LARGE_GRID_SIZE,
     height: LARGE_GRID_SIZE,
+    shadowColor: DEFAULT_COMPONENT_SHADOW_COLORS[props.activeControl.type],
   });
 
   // 输出日志：新建对象，类型：<type>，编号：<name><序号>
@@ -2009,6 +2060,24 @@ watch(
       editingId.value = null;
       editingText.value = "";
     }
+
+    // 属性面板修改尺寸后，按最新矩形边界扩展画布，避免控件超出可视区域
+    props.placedComponents.forEach((component) => {
+      if (
+        component.type === "connectionLine" ||
+        component.type === "AGVpath" ||
+        !Number.isFinite(component.width) ||
+        !Number.isFinite(component.height)
+      ) {
+        return;
+      }
+      checkAndExpandCanvas(
+        component.x,
+        component.y,
+        component.width,
+        component.height,
+      );
+    });
 
     if (canvas.value) {
       drawGrid();

@@ -26,6 +26,25 @@
           </div>
         </div>
 
+        <div v-if="isResizableComponent" class="prop-section">
+          <div class="section-title">尺寸与外观</div>
+          <div class="prop-row dimension-row">
+            <span class="prop-key">水平尺寸</span>
+            <input class="property-input" type="number" min="6" step="0.1" :value="widthInMeters" @input="handleDimensionChange('width', $event)" />
+            <span class="property-unit">m</span>
+          </div>
+          <div class="prop-row dimension-row">
+            <span class="prop-key">垂直尺寸</span>
+            <input class="property-input" type="number" min="6" step="0.1" :value="heightInMeters" @input="handleDimensionChange('height', $event)" />
+            <span class="property-unit">m</span>
+          </div>
+          <div class="prop-row dimension-row">
+            <span class="prop-key">阴影颜色</span>
+            <input class="color-input" type="color" :value="selectedItem.shadowColor || '#dbeafe'" @input="handleShadowColorChange" />
+            <span class="color-value">{{ selectedItem.shadowColor || '#dbeafe' }}</span>
+          </div>
+        </div>
+
         <!-- 连接线：连接关系 -->
         <div v-if="selectedItem.type === 'connectionLine'" class="prop-section">
           <div class="section-title">连接关系</div>
@@ -113,6 +132,14 @@ const props = defineProps({
 
 // 与 DesignCanvas.vue 中的 SMALL_GRID_SIZE 保持一致：1 小网格 = 6 像素
 const SMALL_GRID_SIZE = 6;
+const RESIZABLE_COMPONENT_TYPES = new Set([
+  "workstation",
+  "parallelWorkstation",
+  "assemblyWorkstation",
+  "disassemblyWorkstation",
+  "buffer",
+]);
+const emit = defineEmits(["update-component-properties"]);
 
 // 按 id 找出对象的显示名称（名称+序号），找不到则提示已删除
 const resolveLabel = (id) => {
@@ -148,6 +175,23 @@ const centerPhysicalCoord = computed(() => {
   const fmt = (v) => String(+v.toPrecision(6));
   return `(${fmt(mx)}, ${fmt(my)}) m`;
 });
+
+const isResizableComponent = computed(() =>
+  Boolean(props.selectedItem && RESIZABLE_COMPONENT_TYPES.has(props.selectedItem.type)),
+);
+const pixelsToMeters = (pixels) => Number((pixels / SMALL_GRID_SIZE * settings.metersPerGrid).toFixed(2));
+const metersToPixels = (meters) => meters / settings.metersPerGrid * SMALL_GRID_SIZE;
+const widthInMeters = computed(() => pixelsToMeters(props.selectedItem?.width || 0));
+const heightInMeters = computed(() => pixelsToMeters(props.selectedItem?.height || 0));
+
+const handleDimensionChange = (dimension, event) => {
+  const meters = Math.max(6, Number(event.target.value) || 6);
+  emit("update-component-properties", { id: props.selectedItem.id, [dimension]: metersToPixels(meters) });
+};
+
+const handleShadowColorChange = (event) => {
+  emit("update-component-properties", { id: props.selectedItem.id, shadowColor: event.target.value });
+};
 
 // AGV 路径的拐点数量（不包括起点和终点站点）
 const cornerCount = computed(() => {
@@ -307,6 +351,34 @@ const handleCornerRadiusChange = (index, event) => {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.dimension-row {
+  align-items: center;
+}
+
+.property-input {
+  width: 72px;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 3px;
+  font-size: 13px;
+  color: #1f2937;
+}
+
+.property-unit,
+.color-value {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.color-input {
+  width: 34px;
+  height: 26px;
+  padding: 1px;
+  border: 1px solid #d1d5db;
+  border-radius: 3px;
+  background: #ffffff;
 }
 
 .section-title {

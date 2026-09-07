@@ -32,6 +32,7 @@
           @component-placed="handleComponentPlaced"
           @select-component="handleSelectComponent"
           @update-component-position="handleUpdateComponentPosition"
+          @update-component-properties="handleUpdateComponentProperties"
           @rename-component="handleRenameComponent"
         />
       </div>
@@ -63,6 +64,7 @@
       <PropertyPanel
         :selectedItem="selectedComponent"
         :placedComponents="placedComponents"
+        @update-component-properties="handleUpdateComponentProperties"
       />
     </div>
   </div>
@@ -151,6 +153,26 @@ const handleUpdateComponentPosition = ({ id, x, y, nodes }) => {
   if (target.type === 'node') {
     updateAGVPathsForNode(id, x, y)
   }
+}
+
+const handleUpdateComponentProperties = ({ id, width, height, shadowColor }) => {
+  const target = placedComponents.value.find((item) => item.id === id)
+  if (!target) return
+
+  const centerX = target.x + target.width / 2
+  const centerY = target.y + target.height / 2
+  const nextWidth = Number.isFinite(width) ? width : target.width
+  const nextHeight = Number.isFinite(height) ? height : target.height
+
+  if (Number.isFinite(width)) {
+    target.width = nextWidth
+    target.x = Math.max(0, centerX - nextWidth / 2)
+  }
+  if (Number.isFinite(height)) {
+    target.height = nextHeight
+    target.y = Math.max(0, centerY - nextHeight / 2)
+  }
+  if (typeof shadowColor === 'string') target.shadowColor = shadowColor
 }
 
 // 修正 AGV 路径所有拐点的圆角：若某个圆角超出前后线段长度之半，自动缩到允许的最大值
