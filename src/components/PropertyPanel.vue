@@ -30,12 +30,12 @@
           <div class="section-title">尺寸与外观</div>
           <div class="prop-row dimension-row">
             <span class="prop-key">水平尺寸</span>
-            <input class="property-input" type="number" min="6" step="0.1" :value="widthInMeters" @input="handleDimensionChange('width', $event)" />
+            <input class="property-input" type="number" min="0.01" step="0.01" :value="widthInMeters" @input="handleDimensionChange('width', $event)" @blur="handleDimensionBlur('width', $event)" />
             <span class="property-unit">m</span>
           </div>
           <div class="prop-row dimension-row">
             <span class="prop-key">垂直尺寸</span>
-            <input class="property-input" type="number" min="6" step="0.1" :value="heightInMeters" @input="handleDimensionChange('height', $event)" />
+            <input class="property-input" type="number" min="0.01" step="0.01" :value="heightInMeters" @input="handleDimensionChange('height', $event)" @blur="handleDimensionBlur('height', $event)" />
             <span class="property-unit">m</span>
           </div>
           <div class="prop-row dimension-row">
@@ -82,8 +82,8 @@
               <input
                 type="number"
                 min="0"
-                step="0.1"
-                :value="metersToRadius(radius)"
+                step="0.01"
+                :value="fmtRadius(radius)"
                 @input="handleCornerRadiusChange(index, $event)"
                 :class="['corner-input', { 'corner-error': isCornerRadiusTooLarge(index, radius) }]"
               />
@@ -99,10 +99,6 @@
         <div v-else class="prop-section">
           <div class="section-title">坐标</div>
           <div class="prop-row">
-            <span class="prop-key">中心点像素坐标</span>
-            <span class="prop-value">{{ centerGridCoord }}</span>
-          </div>
-          <div class="prop-row">
             <span class="prop-key">中心点物理坐标</span>
             <span class="prop-value">{{ centerPhysicalCoord }}</span>
           </div>
@@ -115,7 +111,6 @@
 <script setup>
 import { computed } from "vue";
 import { getComponentLabel } from "../utils/componentLabel.js";
-import { settings } from "../store/settings.js";
 
 const props = defineProps({
   // 当前选中的控件对象（由父组件根据 selectedId 查出后传入）
@@ -130,8 +125,6 @@ const props = defineProps({
   },
 });
 
-// 与 DesignCanvas.vue 中的 SMALL_GRID_SIZE 保持一致：1 小网格 = 6 像素
-const SMALL_GRID_SIZE = 6;
 const RESIZABLE_COMPONENT_TYPES = new Set([
   "workstation",
   "parallelWorkstation",
@@ -155,38 +148,38 @@ const toLabel = computed(() =>
   props.selectedItem ? resolveLabel(props.selectedItem.toId) : "",
 );
 
-// 中心点像素坐标（以小网格为单位，整数）
-const centerGridCoord = computed(() => {
-  const item = props.selectedItem;
-  if (!item || item.type === "connectionLine" || item.type === "AGVpath") return "";
-  const cx = Math.round((item.x + item.width / 2) / SMALL_GRID_SIZE);
-  const cy = Math.round((item.y + item.height / 2) / SMALL_GRID_SIZE);
-  return `(${cx}, ${cy})`;
-});
-
-// 中心点物理坐标（以米为单位，去尾零）
+// 中心点物理坐标（以米为单位，去尾零）。数据层已存米，直接计算
 const centerPhysicalCoord = computed(() => {
   const item = props.selectedItem;
   if (!item || item.type === "connectionLine" || item.type === "AGVpath") return "";
-  const cx = (item.x + item.width / 2) / SMALL_GRID_SIZE;
-  const cy = (item.y + item.height / 2) / SMALL_GRID_SIZE;
-  const mx = cx * settings.metersPerGrid;
-  const my = cy * settings.metersPerGrid;
   const fmt = (v) => String(+v.toPrecision(6));
-  return `(${fmt(mx)}, ${fmt(my)}) m`;
+  const cx = fmt(item.x + item.width / 2);
+  const cy = fmt(item.y + item.height / 2);
+  return `(${cx}, ${cy}) m`;
 });
 
 const isResizableComponent = computed(() =>
   Boolean(props.selectedItem && RESIZABLE_COMPONENT_TYPES.has(props.selectedItem.type)),
 );
-const pixelsToMeters = (pixels) => Number((pixels / SMALL_GRID_SIZE * settings.metersPerGrid).toFixed(2));
-const metersToPixels = (meters) => meters / settings.metersPerGrid * SMALL_GRID_SIZE;
-const widthInMeters = computed(() => pixelsToMeters(props.selectedItem?.width || 0));
-const heightInMeters = computed(() => pixelsToMeters(props.selectedItem?.height || 0));
+// 尺寸已直接以米存储，这里只做 2 位小数显示（与输入框 step 0.01 一致）
+const widthInMeters = computed(() => Number((props.selectedItem?.width || 0).toFixed(2)));
+const heightInMeters = computed(() => Number((props.selectedItem?.height || 0).toFixed(2)));
 
 const handleDimensionChange = (dimension, event) => {
-  const meters = Math.max(6, Number(event.target.value) || 6);
-  emit("update-component-properties", { id: props.selectedItem.id, [dimension]: metersToPixels(meters) });
+  const inputValue = Number(event.target.value);
+  // 允许用户输入过程中的任意值（米），不做限制
+  if (!isNaN(inputValue) && inputValue > 0) {
+    emit("update-component-properties", { id: props.selectedItem.id, [dimension]: inputValue });
+  }
+};
+
+const handleDimensionBlur = (dimension, event) => {
+  const inputValue = Number(event.target.value);
+  // 失焦时应用最小值限制（0.01 米）
+  const meters = Math.max(0.01, inputValue || 0.01);
+  if (meters !== inputValue) {
+    emit("update-component-properties", { id: props.selectedItem.id, [dimension]: meters });
+  }
 };
 
 const handleShadowColorChange = (event) => {
@@ -200,20 +193,11 @@ const cornerCount = computed(() => {
   return Math.max(0, (item.nodes?.length || 0) - 2);
 });
 
-// 将像素半径转换为米
-const metersToRadius = (radiusInPixels) => {
-  // 半径单位从像素转换为米
-  return Number((radiusInPixels / SMALL_GRID_SIZE * settings.metersPerGrid).toFixed(2));
-};
+// 拐点圆角半径显示（米，2 位小数）。cornerRadii 已直接存米，无需换算
+const fmtRadius = (radiusInMeters) => Number((radiusInMeters || 0).toFixed(2));
 
-// 将米转换为像素半径
-const radiusToPixels = (radiusInMeters) => {
-  // 半径单位从米转换为像素
-  return radiusInMeters / settings.metersPerGrid * SMALL_GRID_SIZE;
-};
-
-// 检查圆角是否过大
-const isCornerRadiusTooLarge = (cornerIndex, radiusInPixels) => {
+// 检查圆角是否过大（radiusInMeters 与 nodes 均为米）
+const isCornerRadiusTooLarge = (cornerIndex, radiusInMeters) => {
   const item = props.selectedItem;
   if (!item || item.type !== "AGVpath" || !item.nodes) return false;
 
@@ -233,19 +217,16 @@ const isCornerRadiusTooLarge = (cornerIndex, radiusInPixels) => {
   // 圆角半径不能超过任一线段长度的一半
   const maxRadius = Math.min(dist1, dist2) / 2;
 
-  return radiusInPixels > maxRadius;
+  return radiusInMeters > maxRadius;
 };
 
-// 处理拐点圆角半径变化
+// 处理拐点圆角半径变化（单位为米）
 const handleCornerRadiusChange = (index, event) => {
   const radiusInMeters = Number(event.target.value) || 0;
   if (!props.selectedItem || !props.selectedItem.cornerRadii) return;
 
-  // 转换为像素
-  const radiusInPixels = radiusToPixels(radiusInMeters);
-
   // 检查是否过大
-  if (isCornerRadiusTooLarge(index, radiusInPixels)) {
+  if (isCornerRadiusTooLarge(index, radiusInMeters)) {
     // 如果过大，计算最大允许值
     const nodes = props.selectedItem.nodes;
     const actualIndex = index + 1;
@@ -260,7 +241,7 @@ const handleCornerRadiusChange = (index, event) => {
     props.selectedItem.cornerRadii[index] = maxRadius;
   } else {
     // 直接修改响应式对象
-    props.selectedItem.cornerRadii[index] = Math.max(0, radiusInPixels);
+    props.selectedItem.cornerRadii[index] = Math.max(0, radiusInMeters);
   }
 };
 
