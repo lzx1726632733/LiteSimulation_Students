@@ -5,7 +5,10 @@
       <ResourceSidebar
         :placedComponents="placedComponents"
         :selectedId="selectedId"
+        :selectedIds="selectedIds"
         @select-component="handleSelectComponent"
+        @toggle-component-selection="handleToggleComponentSelection"
+        @focus-component="handleTreeFocusComponent"
         @remove-component="handleRemoveComponent"
         @add-log="handleAddLog"
       />
@@ -24,14 +27,18 @@
       <!-- 上部画布区域 -->
       <div class="canvas-panel panel-box">
         <DesignCanvas
+          ref="designCanvas"
           :activeControl="activeControl"
           :placedComponents="placedComponents"
           :selectedId="selectedId"
+          :selectedIds="selectedIds"
           @placement-done="emit('placement-done')"
           @add-log="handleAddLog"
           @component-placed="handleComponentPlaced"
           @select-component="handleSelectComponent"
+          @select-components="handleSelectComponents"
           @update-component-position="handleUpdateComponentPosition"
+          @update-component-positions="handleUpdateComponentPositions"
           @update-component-properties="handleUpdateComponentProperties"
           @rename-component="handleRenameComponent"
         />
@@ -65,6 +72,7 @@
         :selectedItem="selectedComponent"
         :placedComponents="placedComponents"
         @update-component-properties="handleUpdateComponentProperties"
+        @update-component-position="handleUpdateComponentPosition"
       />
     </div>
   </div>
@@ -92,6 +100,8 @@ const placedComponents = ref([])
 
 // 模型树中当前选中的控件 id
 const selectedId = ref(null)
+const selectedIds = ref([])
+const designCanvas = ref(null)
 
 // 右侧属性面板宽度
 const rightPanelWidth = ref(280)
@@ -124,12 +134,30 @@ const handleAddLog = (message) => {
 const handleComponentPlaced = (component) => {
   placedComponents.value.push(component)
   // 放置后自动选中该控件，效果与在模型树中选中一致（显示蓝色选中框）
-  selectedId.value = component.id
+  handleSelectComponent(component.id)
 }
 
-// 模型树选中控件
+// 模型树单击和画布选择只更新选中态，保持视图稳定。
 const handleSelectComponent = (id) => {
   selectedId.value = id
+  selectedIds.value = id ? [id] : []
+}
+
+const handleSelectComponents = (ids) => {
+  const existingIds = new Set(placedComponents.value.map((item) => item.id))
+  selectedIds.value = [...new Set(ids)].filter((id) => existingIds.has(id))
+  selectedId.value = selectedIds.value[0] ?? null
+}
+
+const handleToggleComponentSelection = (id) => {
+  const ids = selectedIds.value
+  handleSelectComponents(ids.includes(id) ? ids.filter((selected) => selected !== id) : [...ids, id])
+}
+
+// 模型树双击时定位，即使双击的仍是当前选中对象。
+const handleTreeFocusComponent = (id) => {
+  handleSelectComponent(id)
+  designCanvas.value?.focusComponent(id)
 }
 
 // 画布拖拽控件后，更新单一数据源中的位置
@@ -166,13 +194,44 @@ const handleUpdateComponentProperties = ({ id, width, height, shadowColor }) => 
 
   if (Number.isFinite(width)) {
     target.width = nextWidth
-    target.x = Math.max(0, centerX - nextWidth / 2)
+    target.x = centerX - nextWidth / 2
   }
   if (Number.isFinite(height)) {
     target.height = nextHeight
-    target.y = Math.max(0, centerY - nextHeight / 2)
+    target.y = centerY - nextHeight / 2
   }
   if (typeof shadowColor === 'string') target.shadowColor = shadowColor
+}
+
+// 多选拖动先同时更新控件，再同步站点关联路径，避免中间状态误缩小圆角。
+const handleUpdateComponentPositions = (positions) => {
+  const movedNodes = new Map()
+  positions.forEach(({ id, x, y }) => {
+    const target = placedComponents.value.find((item) => item.id === id)
+    if (!target || !Number.isFinite(x) || !Number.isFinite(y)) return
+    target.x = x
+    target.y = y
+    if (target.type === 'node') movedNodes.set(id, { x, y })
+  })
+  placedComponents.value.forEach((component) => {
+    if (component.type !== 'AGVpath' || !component.nodes?.length) return
+    const from = movedNodes.get(component.fromId)
+    const to = movedNodes.get(component.toId)
+    if (!from && !to) return
+    // 两端站点同向移动时整条路径一起平移，保持原有走向和圆角。
+    const first = component.nodes[0]
+    const last = component.nodes[component.nodes.length - 1]
+    const dx = from ? from.x - first.x : 0
+    const dy = from ? from.y - first.y : 0
+    const moveWholePath = from && to &&
+      Math.abs(to.x - last.x - dx) < 1e-8 && Math.abs(to.y - last.y - dy) < 1e-8
+    component.nodes = component.nodes.map((point, index) => {
+      if (index === 0 && from) return { ...from }
+      if (index === component.nodes.length - 1 && to) return { ...to }
+      return moveWholePath ? { x: point.x + dx, y: point.y + dy } : point
+    })
+    clampAGVPathCornerRadii(component)
+  })
 }
 
 // 修正 AGV 路径所有拐点的圆角：若某个圆角超出前后线段长度之半，自动缩到允许的最大值
@@ -272,10 +331,8 @@ const handleRemoveComponent = (id) => {
     (item) => !removedIds.has(item.id)
   )
 
-  // 若删除的是当前选中项（或被连带删除的连接线/AGV路径），清空选中
-  if (removedIds.has(selectedId.value)) {
-    selectedId.value = null
-  }
+  // 清理被删除及连带删除的选中项。
+  handleSelectComponents(selectedIds.value.filter((selected) => !removedIds.has(selected)))
 
   // 输出日志：删除对象
   logs.value.push(`删除对象，类型：${target.type}，编号：${getComponentLabel(target)}`)
@@ -309,7 +366,8 @@ const handleKeyDown = (e) => {
   if (selectedId.value == null) return
 
   e.preventDefault()
-  handleRemoveComponent(selectedId.value)
+  const ids = selectedIds.value.length ? [...selectedIds.value] : [selectedId.value]
+  ids.forEach(handleRemoveComponent)
 }
 
 // 开始拖动右侧分割条

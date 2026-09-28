@@ -62,8 +62,9 @@
                   v-for="instance in group.instances"
                   :key="instance.id"
                   class="tree-row instance-row"
-                  :class="{ selected: instance.id === selectedId }"
-                  @click="selectInstance(instance.id)"
+                  :class="{ selected: selectedIds.includes(instance.id) || instance.id === selectedId }"
+                  @click="selectInstance(instance.id, $event)"
+                  @dblclick="emit('focus-component', instance.id)"
                 >
                   <img class="tree-icon" :src="instance.icon" :alt="instance.name" />
                   <span class="tree-label">{{ getComponentLabel(instance) }}</span>
@@ -71,6 +72,7 @@
                     class="delete-btn"
                     title="删除"
                     @click.stop="removeInstance(instance.id)"
+                    @dblclick.stop
                   >
                     ×
                   </button>
@@ -99,9 +101,13 @@ const props = defineProps({
     type: String,
     default: null,
   },
+  selectedIds: {
+    type: Array,
+    default: () => [],
+  },
 });
 
-const emit = defineEmits(["select-component", "remove-component", "add-log"]);
+const emit = defineEmits(["select-component", "toggle-component-selection", "focus-component", "remove-component", "add-log"]);
 
 // 搜索关键字
 const searchQuery = ref("");
@@ -171,8 +177,8 @@ const treeData = computed(() => {
 });
 
 // 选中实例
-const selectInstance = (id) => {
-  emit("select-component", id);
+const selectInstance = (id, event) => {
+  emit(event?.shiftKey ? "toggle-component-selection" : "select-component", id);
 };
 
 // 删除实例（通知父组件与画布同步）

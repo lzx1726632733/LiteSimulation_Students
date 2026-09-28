@@ -95,12 +95,22 @@
           </div>
         </div>
 
-        <!-- 普通控件：坐标信息 -->
+        <!-- 普通控件和站点：可编辑的中心点物理坐标 -->
         <div v-else class="prop-section">
-          <div class="section-title">坐标</div>
-          <div class="prop-row">
-            <span class="prop-key">中心点物理坐标</span>
-            <span class="prop-value">{{ centerPhysicalCoord }}</span>
+          <div class="section-title">中心点物理坐标</div>
+          <div v-for="axis in ['x', 'y']" :key="`${selectedItem.id}-${axis}`" class="prop-row dimension-row">
+            <label class="prop-key" :for="`center-coordinate-${axis}`">{{ axis.toUpperCase() }} 坐标</label>
+            <input
+              :id="`center-coordinate-${axis}`"
+              class="property-input"
+              type="number"
+              step="0.1"
+              :value="centerCoordinates[axis]"
+              @change="handleCenterCoordinateChange(axis, $event)"
+              @blur="handleCenterCoordinateChange(axis, $event)"
+              @keydown.enter.prevent="$event.target.blur()"
+            />
+            <span class="property-unit">m</span>
           </div>
         </div>
       </div>
@@ -132,7 +142,7 @@ const RESIZABLE_COMPONENT_TYPES = new Set([
   "disassemblyWorkstation",
   "buffer",
 ]);
-const emit = defineEmits(["update-component-properties"]);
+const emit = defineEmits(["update-component-properties", "update-component-position"]);
 
 // 按 id 找出对象的显示名称（名称+序号），找不到则提示已删除
 const resolveLabel = (id) => {
@@ -148,15 +158,33 @@ const toLabel = computed(() =>
   props.selectedItem ? resolveLabel(props.selectedItem.toId) : "",
 );
 
-// 中心点物理坐标（以米为单位，去尾零）。数据层已存米，直接计算
-const centerPhysicalCoord = computed(() => {
+// 数据中 x/y 是左下角，输入框显示中心点；保留正负数和小数精度。
+const centerCoordinates = computed(() => {
   const item = props.selectedItem;
-  if (!item || item.type === "connectionLine" || item.type === "AGVpath") return "";
-  const fmt = (v) => String(+v.toPrecision(6));
-  const cx = fmt(item.x + item.width / 2);
-  const cy = fmt(item.y + item.height / 2);
-  return `(${cx}, ${cy}) m`;
+  if (!item || item.type === "connectionLine" || item.type === "AGVpath") return { x: 0, y: 0 };
+  return {
+    x: Number((item.x + (item.width ?? 0) / 2).toFixed(10)),
+    y: Number((item.y + (item.height ?? 0) / 2).toFixed(10)),
+  };
 });
+
+// 完成输入后提交；清空或尚未输完负号时不移动控件，失焦恢复原坐标。
+const handleCenterCoordinateChange = (axis, event) => {
+  const item = props.selectedItem;
+  if (!item || item.type === "connectionLine" || item.type === "AGVpath") return;
+  const rawValue = event.target.value.trim();
+  const value = Number(rawValue);
+  if (rawValue === "" || !Number.isFinite(value)) {
+    event.target.value = String(centerCoordinates.value[axis]);
+    return;
+  }
+  if (value === centerCoordinates.value[axis]) return;
+  const position = { id: item.id, x: item.x, y: item.y };
+  const dimension = axis === "x" ? "width" : "height";
+  position[axis] = Number((value - (item[dimension] ?? 0) / 2).toFixed(10));
+  // 共用拖动的更新事件，使站点关联的 AGV 路径也同步更新。
+  emit("update-component-position", position);
+};
 
 const isResizableComponent = computed(() =>
   Boolean(props.selectedItem && RESIZABLE_COMPONENT_TYPES.has(props.selectedItem.type)),
