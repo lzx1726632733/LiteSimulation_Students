@@ -10,7 +10,7 @@
         ref="canvas"
         :style="{ cursor: cursorStyle }"
         tabindex="0"
-        aria-label="设计画布：左键选择、拖动或框选控件，按住中键平移画布，滚轮缩放，移动步长 0.1 米，靠近控件中线或边缘自动对齐，Alt 暂停自动对齐"
+        aria-label="设计画布：左键选择、拖动或框选控件，按住中键平移画布，滚轮缩放，移动步长 0.01 米，靠近控件中线或边缘自动对齐，Alt 暂停自动对齐"
         @pointerdown="handleMouseDown"
         @pointermove="handleMouseMove"
         @pointerup="handleMouseUp"
@@ -37,7 +37,7 @@
       />
     </div>
 
-    <!-- 恢复全局视图；缩放使用滚轮，移动精度固定为 0.1m。 -->
+    <!-- 恢复全局视图；缩放使用滚轮，移动精度固定为 0.01m。 -->
     <div class="zoom-controls">
       <button
         class="zoom-btn"
@@ -52,6 +52,9 @@
 import { ref, onMounted, onBeforeUnmount, nextTick, computed, watch } from "vue";
 import { getComponentLabel } from "../utils/componentLabel.js";
 import { alignBounds } from "../utils/alignment.js";
+import { DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter } from "../utils/stations.js";
+import { DEFAULT_PATH_WIDTH, getPathWidth, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds } from "../utils/agvPath.js";
+import { RESIZABLE_COMPONENT_TYPES, DEFAULT_COMPONENT_SHADOW_COLORS, DEFAULT_COMPONENT_SIZES } from "../utils/componentAppearance.js";
 
 // 定义 props
 const props = defineProps({
@@ -111,7 +114,7 @@ const createComponentId = () => {
 };
 
 // 模型以米保存；视图比例、原点与固定移动步长相互独立。
-const SNAP_STEP = 0.1;
+const SNAP_STEP = 0.01;
 const ALIGNMENT_THRESHOLD_PX = 6;
 const alignmentGuides = ref([]);
 const DEFAULT_PPM = 10;
@@ -124,36 +127,14 @@ const viewOrigin = ref({ x: 0, y: 0 });
 const viewportWidth = ref(1);
 const viewportHeight = ref(1);
 
-// 网格只负责显示，自动选择 1、2、5 系列间距，最细显示 0.1m。
+// 网格只负责显示，自动选择 1、2、5 系列间距，最细显示 0.01m。
 const metersPerCell = computed(() => {
   const target = Math.max(SNAP_STEP, 12 / ppm.value);
   const base = 10 ** Math.floor(Math.log10(target));
   return [1, 2, 5, 10].find((factor) => factor * base >= target) * base;
 });
 
-// 可调整尺寸的控件类型（这类控件有真实的宽高，单位为米）
-const RESIZABLE_COMPONENT_TYPES = new Set([
-  "workstation",
-  "parallelWorkstation",
-  "assemblyWorkstation",
-  "disassemblyWorkstation",
-  "buffer",
-]);
-const DEFAULT_COMPONENT_SHADOW_COLORS = {
-  workstation: "#dbeafe",
-  parallelWorkstation: "#dcfce7",
-  assemblyWorkstation: "#fef3c7",
-  disassemblyWorkstation: "#fce7f3",
-  buffer: "#ede9fe",
-};
-// 各类型控件的默认真实尺寸（米）。暂定占位值，可按实际车间调整
-const DEFAULT_COMPONENT_SIZES = {
-  workstation: { width: 3, height: 3 },
-  parallelWorkstation: { width: 3, height: 3 },
-  assemblyWorkstation: { width: 3, height: 3 },
-  disassemblyWorkstation: { width: 3, height: 3 },
-  buffer: { width: 3, height: 3 },
-};
+// 可调整尺寸控件的默认实际尺寸与阴影颜色共用 componentAppearance 配置。
 
 // 网格与背景颜色
 const GRID_COLOR = "#e0e0e0"; // 网格线颜色（浅灰，需与背景有足够对比度）
@@ -186,7 +167,7 @@ let resizeObserver = null;
 
 // 光标状态
 const showCursor = ref(false);
-// 放置锚点的世界坐标（米），以此点作为控件中心；优先对齐控件，否则按 0.1m 吸附。
+// 放置锚点的世界坐标（米），以此点作为控件中心；优先对齐控件，否则按 0.01m 吸附。
 const cursorX = ref(0);
 const cursorY = ref(0);
 const mouseInsideCanvas = ref(false);
@@ -523,7 +504,7 @@ const drawSingleComponent = (ctx, component) => {
     return;
   }
 
-  // 站点单独绘制（不需要图片，直接画圆点）
+  // 站点按实际尺寸绘制，并以类型颜色区分。
   if (component.type === "node") {
     drawNodeComponent(ctx, component);
     return;
@@ -585,9 +566,13 @@ const drawPlacedComponents = (ctx) => {
   // 标签包围盒每帧重算，避免控件删除/移动后留下过期的命中区域
   labelRects.clear();
 
+  // 通道铺在设备与站点下方，避免遮住站点区域。
+  props.placedComponents.filter((component) => component.type === "AGVpath")
+    .forEach((component) => drawAGVPath(ctx, component));
+
   props.placedComponents.forEach((component) => {
     // 连接线在所有控件绘制完成后统一绘制
-    if (component.type === "connectionLine") {
+    if (component.type === "connectionLine" || component.type === "AGVpath") {
       return;
     }
     drawSingleComponent(ctx, component);
@@ -609,41 +594,25 @@ const drawPlacedComponents = (ctx) => {
   }
 };
 
-// 站点尺寸参数
-const NODE_SIZE = SMALL_GRID_SIZE; // 站点大小为一个小网格
-const NODE_RADIUS = 4; // 站点圆点半径
-
-// 绘制站点控件（小圆点，放置在网格交点上）
+// 站点中心坐标保持不变，矩形宽高随视图比例缩放。
 const drawNodeComponent = (ctx, component) => {
-  // 站点中心就是其世界坐标（米）投影像素后的位置（已对齐到网格交点）
-  const centerX = toPx(component.x);
-  const centerY = toScreenY(component.y);
+  const bounds = getComponentBounds(component);
+  const style = getStationType(component);
+  const x = toPx(bounds.x);
+  const y = toScreenY(bounds.y + bounds.height);
+  const width = toPx(bounds.width);
+  const height = toPx(bounds.height);
+  ctx.fillStyle = style.fill;
+  ctx.fillRect(x, y, width, height);
+  ctx.strokeStyle = style.color;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(x, y, width, height);
 
-  // 选中的站点先绘制高亮底框
   if (isComponentSelected(component.id)) {
     ctx.strokeStyle = "#2566fd";
     ctx.lineWidth = 2;
-    const halfSize = NODE_SIZE / 2;
-    ctx.strokeRect(
-      centerX - halfSize - 1,
-      centerY - halfSize - 1,
-      NODE_SIZE + 2,
-      NODE_SIZE + 2,
-    );
-    ctx.fillStyle = "rgba(37, 102, 253, 0.08)";
-    ctx.fillRect(centerX - halfSize, centerY - halfSize, NODE_SIZE, NODE_SIZE);
+    ctx.strokeRect(x - 2, y - 2, width + 4, height + 4);
   }
-
-  // 绘制站点圆点
-  ctx.beginPath();
-  ctx.arc(centerX, centerY, NODE_RADIUS, 0, Math.PI * 2);
-  ctx.fillStyle = "#f59e0b"; // 橙色站点
-  ctx.fill();
-  ctx.strokeStyle = "#ffffff";
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // 在站点旁边绘制名称标签
   drawComponentLabel(ctx, component);
 };
 
@@ -656,25 +625,15 @@ const drawComponentLabel = (ctx, component) => {
   ctx.textBaseline = "top";
   ctx.fillStyle = "#333333";
 
-  let centerX, labelY; // 像素坐标
-
-  // 站点的标签显示在右侧
-  if (component.type === "node") {
-    centerX = toPx(component.x) + NODE_RADIUS + 8;
-    labelY = toScreenY(component.y) - LABEL_FONT_SIZE / 2;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-  } else {
-    // 其他控件标签居中于控件正下方
-    centerX = toPx(component.x) + toPx(component.width) / 2;
-    labelY = toScreenY(component.y) + LABEL_GAP;
-  }
+  const bounds = getComponentBounds(component);
+  const centerX = toPx(bounds.x + bounds.width / 2);
+  const labelY = toScreenY(bounds.y) + LABEL_GAP;
 
   // 用当前字体量出文本宽度，得到与绘制结果一致的包围盒。
   // labelRects 存世界坐标（米），供米域命中判定与输入框定位共用
   const textWidth = ctx.measureText(label).width;
   labelRects.set(component.id, {
-    x: toMeters(component.type === "node" ? centerX : centerX - textWidth / 2),
+    x: toMeters(centerX - textWidth / 2),
     y: -toMeters(labelY + LABEL_FONT_SIZE),
     width: toMeters(textWidth),
     height: toMeters(LABEL_FONT_SIZE),
@@ -776,10 +735,12 @@ const resolveLineEndpoints = (line) => {
   const toComp = props.placedComponents.find((c) => c.id === line.toId);
   if (!fromComp || !toComp) return null;
 
-  const fromCenterX = toPx(fromComp.x + fromComp.width / 2);
-  const fromCenterY = toScreenY(fromComp.y + fromComp.height / 2);
-  const toCenterX = toPx(toComp.x + toComp.width / 2);
-  const toCenterY = toScreenY(toComp.y + toComp.height / 2);
+  const fromCenter = getComponentCenter(fromComp);
+  const toCenter = getComponentCenter(toComp);
+  const fromCenterX = toPx(fromCenter.x);
+  const fromCenterY = toScreenY(fromCenter.y);
+  const toCenterX = toPx(toCenter.x);
+  const toCenterY = toScreenY(toCenter.y);
 
   const dirX = toCenterX - fromCenterX;
   const dirY = toCenterY - fromCenterY;
@@ -859,8 +820,9 @@ const drawArrow = (ctx, geo, color) => {
 // 绘制临时连接线（已点第一个控件，虚线跟随鼠标预览）
 const drawTempConnectionLine = (ctx) => {
   const from = firstComponent.value;
-  const fromCenterX = toPx(from.x + from.width / 2);
-  const fromCenterY = toScreenY(from.y + from.height / 2);
+  const center = getComponentCenter(from);
+  const fromCenterX = toPx(center.x);
+  const fromCenterY = toScreenY(center.y);
   const tip = { x: toPx(tempLineEnd.value.x), y: toScreenY(tempLineEnd.value.y) };
 
   // 图标边界（像素）：图标居中于控件矩形
@@ -906,90 +868,73 @@ const drawTempConnectionLine = (ctx) => {
 };
 
 // AGV 路径颜色
-const AGV_PATH_COLOR = "#10b981"; // 绿色
-const AGV_PATH_COLOR_SELECTED = "#059669"; // 选中时的深绿
-const AGV_PATH_WIDTH = 3; // 路径线宽
-const AGV_PATH_WIDTH_SELECTED = 4; // 选中时线宽
-const CORNER_RADIUS = 5; // 拐点圆点半径
-const CORNER_GRAB_MARGIN = 3; // 拐点抓取余量
+const AGV_PATH_COLOR = "#059669";
+const AGV_PATH_COLOR_SELECTED = "#047857";
+const CORNER_RADIUS = 5;
+const CORNER_GRAB_MARGIN = 3;
 
-// 绘制 AGV 路径（已放置的）
-const drawAGVPath = (ctx, pathComponent) => {
-  const { nodes, cornerRadii } = pathComponent;
-  if (!nodes || nodes.length < 2) return;
-
-  // 选中状态高亮
-  const isSelected = isComponentSelected(pathComponent.id);
-  const color = isSelected ? AGV_PATH_COLOR_SELECTED : AGV_PATH_COLOR;
-  const lineWidth = isSelected ? AGV_PATH_WIDTH_SELECTED : AGV_PATH_WIDTH;
-
-  // 世界坐标（米）→ 像素
-  const pts = nodes.map((n) => ({ x: toPx(n.x), y: toScreenY(n.y) }));
-
-  // lineJoin/lineCap 是会残留的 context 状态。后备缓冲不再每帧重建后，
-  // 这里若不还原，圆角会漏给之后绘制的网格线和选中框
+const drawAGVPath = (ctx, pathComponent, preview = false) => {
+  const segments = buildPathGeometry(pathComponent);
+  if (!segments.length) return;
+  const selected = !preview && isComponentSelected(pathComponent.id);
+  const width = toPx(getPathWidth(pathComponent));
   ctx.save();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = lineWidth;
-  ctx.lineJoin = "round"; // 圆角连接
-  ctx.lineCap = "round";
-
-  // 如果没有设置圆角，直接绘制折线
-  if (!cornerRadii || cornerRadii.every(r => r === 0)) {
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(pts[i].x, pts[i].y);
-    }
-    ctx.stroke();
-  } else {
-    // 有圆角，使用 arcTo 绘制圆角路径
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-
-    for (let i = 1; i < pts.length - 1; i++) {
-      const curr = pts[i];
-      const next = pts[i + 1];
-      const radius = toPx(cornerRadii[i - 1] || 0);
-
-      if (radius > 0) {
-        // 使用 arcTo 绘制圆角
-        ctx.arcTo(curr.x, curr.y, next.x, next.y, radius);
-      } else {
-        // 无圆角，直接连线
-        ctx.lineTo(curr.x, curr.y);
-      }
-    }
-
-    // 连接到最后一个点
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-    ctx.stroke();
-  }
-
-  // 绘制拐点（不包括起点和终点站点）
-  if (isSelected) {
-    for (let i = 1; i < pts.length - 1; i++) {
+  if (preview) ctx.globalAlpha = 0.6;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "butt";
+  ctx.setLineDash([]);
+  tracePathGeometry(ctx, segments, ppm.value);
+  ctx.strokeStyle = selected ? AGV_PATH_COLOR_SELECTED : AGV_PATH_COLOR;
+  ctx.lineWidth = width + (selected ? 4 : 2);
+  ctx.stroke();
+  ctx.strokeStyle = selected ? "#a7f3d0" : "#d1fae5";
+  ctx.lineWidth = width;
+  ctx.stroke();
+  ctx.fillStyle = "#047857";
+  for (const segment of segments) {
+    const lengthPx = toPx(segment.length);
+    const arrowLength = Math.min(16, width * 0.9, lengthPx * 0.45);
+    if (arrowLength < 2) continue;
+    const count = Math.min(150, Math.max(1, Math.floor(lengthPx / 100)));
+    for (let i = 0; i < count; i++) {
+      const point = pointOnPathSegment(segment, (i + 0.5) / count);
+      const x = toPx(point.x), y = toScreenY(point.y);
+      if (x + viewOffsetX.value < -20 || x + viewOffsetX.value > canvasWidth.value + 20 ||
+          y + viewOffsetY.value < -20 || y + viewOffsetY.value > canvasHeight.value + 20) continue;
+      const ux = point.ux, uy = -point.uy;
+      const half = arrowLength / 2, side = Math.min(width * 0.3, arrowLength * 0.4);
       ctx.beginPath();
-      ctx.arc(pts[i].x, pts[i].y, CORNER_RADIUS, 0, Math.PI * 2);
+      ctx.moveTo(x + ux * half, y + uy * half);
+      ctx.lineTo(x - ux * half - uy * side, y - uy * half + ux * side);
+      ctx.lineTo(x - ux * half + uy * side, y - uy * half - ux * side);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  if (selected) {
+    for (const point of pathComponent.nodes.slice(1, -1)) {
+      ctx.beginPath();
+      ctx.arc(toPx(point.x), toScreenY(point.y), CORNER_RADIUS, 0, Math.PI * 2);
       ctx.fillStyle = "#ffffff";
       ctx.fill();
-      ctx.strokeStyle = color;
+      ctx.strokeStyle = AGV_PATH_COLOR_SELECTED;
       ctx.lineWidth = 2;
       ctx.stroke();
     }
   }
-
   ctx.restore();
-
-  // 在路径中点附近绘制路径名称
-  if (nodes.length >= 2) {
-    const midIdx = Math.floor((nodes.length - 1) / 2);
-    const midNode = nodes[midIdx];
-    drawAGVPathLabel(ctx, pathComponent, midNode);
+  if (!preview) {
+    let remaining = segments.reduce((sum, segment) => sum + segment.length, 0) / 2;
+    for (const segment of segments) {
+      if (remaining <= segment.length) {
+        drawAGVPathLabel(ctx, pathComponent, pointOnPathSegment(segment, remaining / segment.length));
+        break;
+      }
+      remaining -= segment.length;
+    }
   }
 };
 
-// 在 AGV 路径中点附近绘制名称标签
 const drawAGVPathLabel = (ctx, pathComponent, midNode) => {
   const label = getComponentLabel(pathComponent);
 
@@ -1000,7 +945,7 @@ const drawAGVPathLabel = (ctx, pathComponent, midNode) => {
 
   // 标签显示在路径中点右上方
   const labelX = toPx(midNode.x) + 8;
-  const labelY = toScreenY(midNode.y) - 8;
+  const labelY = toScreenY(midNode.y) - toPx(getPathWidth(pathComponent)) / 2 - 8;
 
   // 记录包围盒（世界坐标，米）供双击改名使用
   const textWidth = ctx.measureText(label).width;
@@ -1017,87 +962,32 @@ const drawAGVPathLabel = (ctx, pathComponent, midNode) => {
   ctx.fillText(label, labelX, labelY);
 };
 
-// 绘制临时 AGV 路径（正在绘制中，虚线跟随鼠标预览）
+// 绘制过程中预览相同宽度的通道区域和方向。
 const drawTempAGVPath = (ctx) => {
-  if (!agvStartNode.value || agvPathPoints.value.length === 0) return;
-
-  // 世界坐标（米）→ 像素
-  const points = agvPathPoints.value.map((p) => ({ x: toPx(p.x), y: toScreenY(p.y) }));
-
-  // 绘制已确认的路径段（实线）
-  ctx.strokeStyle = AGV_PATH_COLOR;
-  ctx.lineWidth = AGV_PATH_WIDTH;
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-
-  for (let i = 1; i < points.length; i++) {
-    ctx.lineTo(points[i].x, points[i].y);
-  }
-  ctx.stroke();
-
-  // 绘制临时预览线段（虚线，从最后一个点到鼠标位置）
-  if (tempAGVPoint.value) {
-    const lastPoint = points[points.length - 1];
-    const tip = { x: toPx(tempAGVPoint.value.x), y: toScreenY(tempAGVPoint.value.y) };
-    ctx.strokeStyle = AGV_PATH_COLOR;
-    ctx.lineWidth = AGV_PATH_WIDTH;
-    ctx.setLineDash([5, 4]);
-    ctx.beginPath();
-    ctx.moveTo(lastPoint.x, lastPoint.y);
-    ctx.lineTo(tip.x, tip.y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // 绘制已确认的拐点（小圆点，不包括起点站点）
-  for (let i = 1; i < points.length; i++) {
-    ctx.beginPath();
-    ctx.arc(points[i].x, points[i].y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
-    ctx.strokeStyle = AGV_PATH_COLOR;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-
-  // 绘制临时预览点
-  if (tempAGVPoint.value) {
-    const tip = { x: toPx(tempAGVPoint.value.x), y: toScreenY(tempAGVPoint.value.y) };
-    ctx.beginPath();
-    ctx.arc(tip.x, tip.y, 4, 0, Math.PI * 2);
-    ctx.fillStyle = "rgba(16, 185, 129, 0.3)";
-    ctx.fill();
-    ctx.strokeStyle = AGV_PATH_COLOR;
-    ctx.lineWidth = 2;
-    ctx.stroke();
-  }
-
-  // 高亮起点站点，提示当前正从它拉线
+  if (!agvStartNode.value || !agvPathPoints.value.length) return;
+  const nodes = [...agvPathPoints.value];
+  if (tempAGVPoint.value) nodes.push(tempAGVPoint.value);
+  drawAGVPath(ctx, { nodes, pathWidth: DEFAULT_PATH_WIDTH }, true);
+  ctx.save();
   ctx.strokeStyle = AGV_PATH_COLOR;
   ctx.lineWidth = 2;
-  const halfSize = NODE_SIZE / 2;
-  const sx = toPx(agvStartNode.value.x);
-  const sy = toScreenY(agvStartNode.value.y);
-  ctx.strokeRect(
-    sx - halfSize - 1,
-    sy - halfSize - 1,
-    NODE_SIZE + 2,
-    NODE_SIZE + 2
-  );
+  const bounds = getComponentBounds(agvStartNode.value);
+  ctx.strokeRect(toPx(bounds.x) - 1, toScreenY(bounds.y + bounds.height) - 1,
+    toPx(bounds.width) + 2, toPx(bounds.height) + 2);
+  ctx.restore();
 };
 
-// 绘制光标：以网格线交点（cursorX/cursorY，米）为中心
-// 用一个居中于交点的黄色方框表示放置锚点，方框中心即控件放置后的中心
 const drawCursor = (ctx) => {
   const cx = toPx(cursorX.value);
   const cy = toScreenY(cursorY.value);
-  if (props.activeControl?.type !== "node") {
+  {
     const size = DEFAULT_COMPONENT_SIZES[props.activeControl?.type] || { width: 3, height: 3 };
     const width = toPx(size.width);
     const height = toPx(size.height);
     ctx.save();
-    ctx.fillStyle = "rgba(37, 99, 235, 0.06)";
-    ctx.strokeStyle = "#2563eb";
+    const station = props.activeControl?.type === "node" ? getStationType(props.activeControl) : null;
+    ctx.fillStyle = station?.fill || "rgba(37, 99, 235, 0.06)";
+    ctx.strokeStyle = station?.color || "#2563eb";
     ctx.lineWidth = 1;
     ctx.setLineDash([5, 3]);
     ctx.fillRect(cx - width / 2, cy - height / 2, width, height);
@@ -1135,7 +1025,7 @@ const getCanvasMousePosition = (e) => {
   };
 };
 
-// 普通移动步长为 0.1m；对齐控件时使用其精确坐标。
+// 普通移动步长为 0.01m；对齐控件时使用其精确坐标。
 const snapToStep = (value) =>
   Number((Math.round(value / SNAP_STEP) * SNAP_STEP).toFixed(10));
 
@@ -1144,14 +1034,26 @@ const alignToComponents = (raw, fallback, excludedIds, event, lockedAxis = null)
   alignmentGuides.value = [];
   if (event.altKey) return fallback;
   const margin = ALIGNMENT_THRESHOLD_PX / ppm.value;
-  const targets = props.placedComponents.filter((item) =>
-    isMovableComponent(item) && !excludedIds.has(item.id) &&
+  const viewportWidth = canvasWidth.value / ppm.value;
+  const viewportHeight = canvasHeight.value / ppm.value;
+  const targets = props.placedComponents
+    .filter((item) => isMovableComponent(item) && !excludedIds.has(item.id))
+    .map((item) => ({ id: item.id, ...getComponentBounds(item) }))
+    .filter((item) =>
     Number.isFinite(item.x) && Number.isFinite(item.y) &&
     item.x + (item.width ?? 0) >= viewOrigin.value.x - margin &&
     item.x <= viewOrigin.value.x + canvasWidth.value / ppm.value + margin &&
     item.y + (item.height ?? 0) >= viewOrigin.value.y - canvasHeight.value / ppm.value - margin &&
     item.y <= viewOrigin.value.y + margin
-  ).map((item) => ({ id: item.id, x: item.x, y: item.y, width: item.width ?? 0, height: item.height ?? 0 }));
+  );
+  targets.push(
+    { id: "axis-x", axes: ["y"], anchorKinds: ["edge", "center"], x: viewOrigin.value.x, y: 0, width: viewportWidth, height: 0 },
+    { id: "axis-y", axes: ["x"], anchorKinds: ["edge", "center"], x: 0, y: viewOrigin.value.y - viewportHeight, width: 0, height: viewportHeight },
+  );
+  if (viewOrigin.value.x <= margin && viewOrigin.value.x + viewportWidth >= -margin &&
+    viewOrigin.value.y - viewportHeight <= margin && viewOrigin.value.y >= -margin) {
+    targets.push({ id: "origin", anchorKinds: ["center"], x: 0, y: 0, width: 0, height: 0 });
+  }
   const result = alignBounds(raw, fallback, targets, margin, lockedAxis);
   alignmentGuides.value = result.guides;
   return result;
@@ -1159,8 +1061,7 @@ const alignToComponents = (raw, fallback, excludedIds, event, lockedAxis = null)
 
 // 预览和落点使用同一套计算，吸附后的中心位置就是实际放置位置。
 const getPlacementAnchor = (position, event) => {
-  const size = props.activeControl?.type === "node" ? { width: 0, height: 0 }
-    : DEFAULT_COMPONENT_SIZES[props.activeControl?.type] || { width: 3, height: 3 };
+  const size = DEFAULT_COMPONENT_SIZES[props.activeControl?.type] || { width: 3, height: 3 };
   const raw = { x: position.x - size.width / 2, y: position.y - size.height / 2, ...size };
   const fallback = {
     ...size, x: snapToStep(position.x) - size.width / 2, y: snapToStep(position.y) - size.height / 2,
@@ -1214,21 +1115,13 @@ const hitTestComponent = (x, y) => {
     const component = props.placedComponents[i];
     if (component.type === "connectionLine" || component.type === "AGVpath") continue;
 
-    // 站点使用圆形命中测试（半径是像素，先换算成米）
-    if (component.type === "node") {
-      const dist = Math.hypot(x - component.x, y - component.y);
-      if (dist <= toMeters(NODE_RADIUS + LINE_GRAB_MARGIN)) {
-        return component;
-      }
-      continue;
-    }
-
-    // 其他控件使用矩形命中测试
+    const bounds = getComponentBounds(component);
+    // 包括站点在内，按实际矩形区域命中。
     if (
-      x >= component.x &&
-      x <= component.x + component.width &&
-      y >= component.y &&
-      y <= component.y + component.height
+      x >= bounds.x &&
+      x <= bounds.x + bounds.width &&
+      y >= bounds.y &&
+      y <= bounds.y + bounds.height
     ) {
       return component;
     }
@@ -1372,59 +1265,10 @@ const isPointInArrow = (px, py, geo) => {
   return lateralDist <= halfWidthHere && slant > 0;
 };
 
-// AGV 路径命中判定：使用 isPointInStroke 精确判断（支持圆角）
-const hitTestAGVPath = (path, x, y) => {
-  const { nodes, cornerRadii } = path;
-  if (!nodes || nodes.length < 2) return false;
+// 按真实直线和圆弧区域命中，同时保留少量屏幕抓取余量。
+const hitTestAGVPath = (path, x, y) =>
+  isPointInPathArea(path, x, y, toMeters(LINE_GRAB_MARGIN));
 
-  // 世界坐标（米）→ 像素
-  const pts = nodes.map((n) => ({ x: toPx(n.x), y: toScreenY(n.y) }));
-  const px = toPx(x);
-  const py = toScreenY(y);
-
-  // 创建临时 canvas context 用于命中测试
-  const tempCanvas = document.createElement('canvas');
-  const ctx = tempCanvas.getContext('2d');
-
-  ctx.lineWidth = AGV_PATH_WIDTH_SELECTED + LINE_GRAB_MARGIN * 2; // 增加容差
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-
-  // 重新绘制路径（与 drawAGVPath 逻辑一致）
-  if (!cornerRadii || cornerRadii.every(r => r === 0)) {
-    // 无圆角，直线路径
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) {
-      ctx.lineTo(pts[i].x, pts[i].y);
-    }
-  } else {
-    // 有圆角，使用 arcTo
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-
-    for (let i = 1; i < pts.length - 1; i++) {
-      const curr = pts[i];
-      const next = pts[i + 1];
-      const radius = toPx(cornerRadii[i - 1] || 0);
-
-      if (radius > 0) {
-        ctx.arcTo(curr.x, curr.y, next.x, next.y, radius);
-      } else {
-        ctx.lineTo(curr.x, curr.y);
-      }
-    }
-
-    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-  }
-
-  // 使用 isPointInStroke 判断点是否在路径上
-  return ctx.isPointInStroke(px, py);
-};
-
-// 输入框在容器中的绝对定位样式。
-// labelRects 存的是世界坐标（米），需换算成像素并应用视图偏移；
-// 平移和缩放后使用同一视图偏移，使输入框跟随标签。
 const labelEditorStyle = computed(() => {
   const rect = editingId.value ? labelRects.get(editingId.value) : null;
   if (!rect) return { display: "none" };
@@ -1525,11 +1369,11 @@ const createAGVPath = (endNode) => {
     toId: endNode.id,
     fromName: getComponentLabel(agvStartNode.value),
     toName: getComponentLabel(endNode),
+    pathWidth: DEFAULT_PATH_WIDTH,
     nodes: [...agvPathPoints.value], // 深拷贝所有路径点（包括起点站点、中间拐点、终点站点）
     // 每两个点之间是一条线段
     segments: agvPathPoints.value.slice(1).map(() => ({ type: "line", radius: 0 })),
     // 每个拐点的圆角半径（不包括起点和终点站点）
-    cornerRadii: Array(Math.max(0, agvPathPoints.value.length - 2)).fill(0),
   };
 
   // 通知父组件新增控件
@@ -1599,7 +1443,7 @@ const updateSelectionBox = (position) => {
   const minY = Math.min(box.start.y, position.y);
   const maxY = Math.max(box.start.y, position.y);
   const containsPoint = (x, y) => x >= minX && x <= maxX && y >= minY && y <= maxY;
-  // 连接线使用实际绘制的两端判断，不要求端点控件的整个矩形也被框住。
+  // 连接线按可见线段判断；AGV 通道需完整落入选框才能选中。
   const enclosed = props.placedComponents.filter((item) => {
     if (item.type === "connectionLine") {
       const endpoints = resolveLineEndpoints(item);
@@ -1608,9 +1452,13 @@ const updateSelectionBox = (position) => {
         containsPoint(toMeters(point.x), -toMeters(point.y))
       );
     }
-    return isMovableComponent(item) &&
-      containsPoint(item.x, item.y) &&
-      containsPoint(item.x + (item.width ?? 0), item.y + (item.height ?? 0));
+    if (item.type === "AGVpath") {
+      const bounds = getPathBounds(item);
+      return bounds && containsPoint(bounds.minX, bounds.minY) && containsPoint(bounds.maxX, bounds.maxY);
+    }
+    const bounds = getComponentBounds(item);
+    return isMovableComponent(item) && containsPoint(bounds.x, bounds.y) &&
+      containsPoint(bounds.x + bounds.width, bounds.y + bounds.height);
   }).map((item) => item.id);
   const ids = [...new Set([...box.baseIds, ...enclosed])];
   if (ids.length !== selectedIdSet.value.size || ids.some((id) => !isComponentSelected(id))) {
@@ -1748,6 +1596,11 @@ const handleMouseDown = async (e) => {
       return;
     }
 
+    if (hit.type === "node") {
+      emit("add-log", "连接线：不能连接站点，请使用 AGV 路径连接站点");
+      return;
+    }
+
     if (!firstComponent.value) {
       // 选择第一个控件
       firstComponent.value = hit;
@@ -1872,7 +1725,7 @@ const handleMouseDown = async (e) => {
       dragMoved.value = false;
       dragOrigins = props.placedComponents
         .filter((item) => dragIds.includes(item.id) && isMovableComponent(item))
-        .map((item) => ({ id: item.id, x: item.x, y: item.y, width: item.width ?? 0, height: item.height ?? 0 }));
+        .map((item) => ({ id: item.id, type: item.type, x: item.x, y: item.y, bounds: getComponentBounds(item) }));
     } else {
       emit("select-component", hit.id);
     }
@@ -1890,30 +1743,32 @@ const handleMouseDown = async (e) => {
     const finalX = anchorX;
     const finalY = anchorY;
 
-    // 计算同类型控件的序号
-    const index = getNextIndexForType(props.activeControl.type);
+    // 四种站点分别编号。
+    const station = getStationType(props.activeControl);
+    const index = getNextStationIndex(props.placedComponents, station.value);
 
     // 生成稳定唯一 id
     const id = createComponentId();
 
-    // 通知父组件新增站点控件（站点是抽象点，无尺寸）
+    // 站点的 x/y 继续保存中心，宽高保存实际占地区域。
     emit("component-placed", {
       id,
       type: props.activeControl.type,
-      name: props.activeControl.name,
+      name: station.label,
       icon: props.activeControl.icon,
       tabId: props.activeControl.tabId,
       index,
       x: finalX,
       y: finalY,
-      width: 0,
-      height: 0,
+      width: DEFAULT_STATION_SIZE.width,
+      height: DEFAULT_STATION_SIZE.height,
+      stationType: station.value,
     });
 
     // 输出日志
     emit(
       "add-log",
-      `新建对象，类型：${props.activeControl.type}，编号：${props.activeControl.name}${index}`,
+      `新建对象，类型：${station.label}，编号：${station.label}${index}`,
     );
 
     // 通知父组件放置完成，重置为"选择"状态
@@ -2029,8 +1884,9 @@ const handleMouseMove = (e) => {
 
   // AGV 路径模式且已选中起点站点：更新临时预览点
   if (agvPathMode.value && agvStartNode.value) {
-    const nodeX = snapToStep(pos.x);
-    const nodeY = snapToStep(pos.y);
+    const station = hitTestComponent(pos.x, pos.y);
+    const nodeX = station?.type === "node" ? station.x : snapToStep(pos.x);
+    const nodeY = station?.type === "node" ? station.y : snapToStep(pos.y);
     tempAGVPoint.value = {
       x: nodeX,
       y: nodeY
@@ -2051,7 +1907,7 @@ const handleMouseMove = (e) => {
     const draggedComponent = props.placedComponents.find((c) => c.id === dragId.value);
     if (!draggedComponent) return;
 
-    // 相对于拖动起点按 0.1m 移动，保留抓取偏移，避免已有控件开始拖动时跳动。
+    // 相对于拖动起点按 0.01m 移动，保留抓取偏移，避免已有控件开始拖动时跳动。
     const rawX = pos.x - dragOffsetX.value;
     const rawY = pos.y - dragOffsetY.value;
     let newX = Number((dragOriginX.value +
@@ -2074,11 +1930,11 @@ const handleMouseMove = (e) => {
     }
 
     // 对整组外接矩形吸附，所有成员始终使用同一位移。
-    const minX = Math.min(...dragOrigins.map((item) => item.x));
-    const minY = Math.min(...dragOrigins.map((item) => item.y));
+    const minX = Math.min(...dragOrigins.map((item) => item.bounds.x));
+    const minY = Math.min(...dragOrigins.map((item) => item.bounds.y));
     const size = {
-      width: Math.max(...dragOrigins.map((item) => item.x + item.width)) - minX,
-      height: Math.max(...dragOrigins.map((item) => item.y + item.height)) - minY,
+      width: Math.max(...dragOrigins.map((item) => item.bounds.x + item.bounds.width)) - minX,
+      height: Math.max(...dragOrigins.map((item) => item.bounds.y + item.bounds.height)) - minY,
     };
     const aligned = alignToComponents(
       { ...size, x: minX + rawX - dragOriginX.value, y: minY + rawY - dragOriginY.value },
@@ -2125,8 +1981,8 @@ const endDrag = () => {
     dragOrigins.forEach((origin) => {
       const moved = props.placedComponents.find((item) => item.id === origin.id);
       if (!moved || (moved.x === origin.x && moved.y === origin.y)) return;
-      const halfW = (moved.width ?? 0) / 2;
-      const halfH = (moved.height ?? 0) / 2;
+      const halfW = moved.type === "node" ? 0 : (moved.width ?? 0) / 2;
+      const halfH = moved.type === "node" ? 0 : (moved.height ?? 0) / 2;
       emit("add-log", `移动对象，编号：${getComponentLabel(moved)}` +
         `，中心点物理坐标：(${fmtMeters(origin.x + halfW)} m, ${fmtMeters(origin.y + halfH)} m)` +
         ` → (${fmtMeters(moved.x + halfW)} m, ${fmtMeters(moved.y + halfH)} m)`);
@@ -2255,10 +2111,12 @@ const fitComponentsInView = (components, maxScale = 100, minExtent = 3) => {
   components.forEach((component) => {
     if (component.type === "connectionLine") return;
     if (component.type === "AGVpath") {
-      points.push(...(component.nodes || []));
+      const bounds = getPathBounds(component);
+      if (bounds) points.push({ x: bounds.minX, y: bounds.minY }, { x: bounds.maxX, y: bounds.maxY });
     } else {
-      points.push({ x: component.x, y: component.y });
-      points.push({ x: component.x + (component.width || 0), y: component.y + (component.height || 0) });
+      const bounds = getComponentBounds(component);
+      points.push({ x: bounds.x, y: bounds.y });
+      points.push({ x: bounds.x + bounds.width, y: bounds.y + bounds.height });
     }
     if (ctx) labelPadding = Math.max(labelPadding, ctx.measureText(getComponentLabel(component)).width + 24);
   });
@@ -2375,6 +2233,7 @@ onMounted(() => {
     drawGrid();
   };
   resize();
+  // 仅在画布首次挂载时居中；后续尺寸变化保留当前视图位置和缩放。
   centerOrigin();
   resizeObserver = new ResizeObserver(resize);
   resizeObserver.observe(canvasContainer.value);

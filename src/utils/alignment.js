@@ -1,5 +1,5 @@
 // 所有矩形使用物理坐标：左下角 x/y，正数 width/height。
-// raw 是鼠标未经网格吸附的位置，fallback 是 0.1m 步长后的候选位置。
+// raw 是鼠标未经网格吸附的位置，fallback 是 0.01m 步长后的候选位置。
 export const alignBounds = (raw, fallback, targets, threshold, lockedAxis = null) => {
   const anchors = (bounds, axis) => {
     const size = axis === "x" ? bounds.width : bounds.height;
@@ -14,7 +14,9 @@ export const alignBounds = (raw, fallback, targets, threshold, lockedAxis = null
     if (axis === lockedAxis) continue;
     let best = null;
     for (const target of targets) {
+      if (target.axes && !target.axes.includes(axis)) continue;
       for (const sourceAnchor of anchors(raw, axis)) {
+        if (target.anchorKinds && !target.anchorKinds.includes(sourceAnchor.kind)) continue;
         for (const targetAnchor of anchors(target, axis)) {
           // 中线对中线；同侧边缘对齐及相邻边缘贴合。
           if (sourceAnchor.kind !== targetAnchor.kind) continue;
@@ -23,7 +25,9 @@ export const alignBounds = (raw, fallback, targets, threshold, lockedAxis = null
           if (distance > threshold + 1e-10) continue;
           if (!best || distance < best.distance - 1e-10 ||
             (Math.abs(distance - best.distance) <= 1e-10 &&
-              sourceAnchor.kind === "center" && best.kind !== "center")) {
+              ((target.id === "origin" && best.target.id !== "origin") ||
+                (target.id !== "origin" && best.target.id !== "origin" &&
+                  sourceAnchor.kind === "center" && best.kind !== "center")))) {
             best = { delta, distance, target, value: targetAnchor.value, kind: sourceAnchor.kind };
           }
         }

@@ -39,6 +39,7 @@ const createWindow = async () => {
   const win = new BrowserWindow({
     width: 800,
     height: 600,
+    show: false,
     frame: false, // 去掉原生标题栏（使用前端自定义的 TopBar）
     webPreferences: {
       preload: path.join(__dirname, 'preload.js')
@@ -52,6 +53,11 @@ const createWindow = async () => {
   }
   win.on('maximize', sendMaximizedState)
   win.on('unmaximize', sendMaximizedState)
+  // 页面加载前先最大化，让画布初始化时直接使用最大化后的窗口尺寸。
+  win.maximize()
+  win.once('ready-to-show', () => {
+    win.show()
+  })
 
   if (app.isPackaged) {
     await win.loadFile(path.join(__dirname, '../dist/index.html'))

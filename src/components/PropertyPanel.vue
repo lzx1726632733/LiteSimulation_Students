@@ -22,7 +22,22 @@
           </div>
           <div class="prop-row">
             <span class="prop-key">类型</span>
-            <span class="prop-value">{{ selectedItem.type }}</span>
+            <span class="prop-value">{{ selectedItem.type === 'node' ? '站点' : selectedItem.type }}</span>
+          </div>
+        </div>
+
+        <div v-if="selectedItem.type === 'node'" class="prop-section">
+          <div class="section-title">站点设置</div>
+          <div class="prop-row dimension-row">
+            <label class="prop-key" for="station-type">站点类型</label>
+            <select id="station-type" class="property-input station-type-select" :value="stationStyle.value" @change="handleStationTypeChange">
+              <option v-for="type in STATION_TYPES" :key="type.value" :value="type.value">{{ type.label }}</option>
+            </select>
+          </div>
+          <div class="prop-row">
+            <span class="prop-key">区域颜色</span>
+            <span class="station-color" :style="{ backgroundColor: stationStyle.fill, borderColor: stationStyle.color }"></span>
+            <span class="prop-value">随站点类型设置</span>
           </div>
         </div>
 
@@ -38,10 +53,10 @@
             <input class="property-input" type="number" min="0.01" step="0.01" :value="heightInMeters" @input="handleDimensionChange('height', $event)" @blur="handleDimensionBlur('height', $event)" />
             <span class="property-unit">m</span>
           </div>
-          <div class="prop-row dimension-row">
+          <div v-if="selectedItem.type !== 'node'" class="prop-row dimension-row">
             <span class="prop-key">阴影颜色</span>
-            <input class="color-input" type="color" :value="selectedItem.shadowColor || '#dbeafe'" @input="handleShadowColorChange" />
-            <span class="color-value">{{ selectedItem.shadowColor || '#dbeafe' }}</span>
+            <input class="color-input" type="color" :value="shadowColor" @input="handleShadowColorChange" />
+            <span class="color-value">{{ shadowColor }}</span>
           </div>
         </div>
 
@@ -60,6 +75,18 @@
 
         <!-- AGV 路径：连接关系和圆角设置 -->
         <div v-else-if="selectedItem.type === 'AGVpath'" class="prop-section">
+          <div class="section-title">路径区域</div>
+          <div class="prop-row dimension-row">
+            <label class="prop-key" for="agv-path-width">通道宽度</label>
+            <input id="agv-path-width" class="property-input" type="number" min="0.01" step="0.01"
+              :value="pathWidthInMeters" @change="handlePathWidthChange" @blur="handlePathWidthChange" />
+            <span class="property-unit">m</span>
+          </div>
+          <div class="prop-row">
+            <span class="prop-key">行驶方向</span>
+            <span class="prop-value">起点 → 终点</span>
+            <button class="path-direction-btn" @click="emit('update-component-properties', { id: selectedItem.id, reverseDirection: true })">反向</button>
+          </div>
           <div class="section-title">连接关系</div>
           <div class="prop-row">
             <span class="prop-key">起点站点</span>
@@ -74,25 +101,6 @@
             <span class="prop-value">{{ selectedItem.nodes?.length || 0 }}</span>
           </div>
 
-          <!-- 拐点圆角设置 -->
-          <div v-if="cornerCount > 0" class="section-title" style="margin-top: 16px">拐点圆角</div>
-          <div v-for="(radius, index) in selectedItem.cornerRadii" :key="index" class="corner-section">
-            <div class="prop-row corner-input-row">
-              <span class="prop-key">拐点 {{ index + 1 }}</span>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                :value="fmtRadius(radius)"
-                @input="handleCornerRadiusChange(index, $event)"
-                :class="['corner-input', { 'corner-error': isCornerRadiusTooLarge(index, radius) }]"
-              />
-              <span class="corner-unit">m</span>
-            </div>
-            <div v-if="isCornerRadiusTooLarge(index, radius)" class="corner-error-text">
-              圆角过大，超出可用线段长度
-            </div>
-          </div>
         </div>
 
         <!-- 普通控件和站点：可编辑的中心点物理坐标 -->
@@ -104,7 +112,7 @@
               :id="`center-coordinate-${axis}`"
               class="property-input"
               type="number"
-              step="0.1"
+              step="0.01"
               :value="centerCoordinates[axis]"
               @change="handleCenterCoordinateChange(axis, $event)"
               @blur="handleCenterCoordinateChange(axis, $event)"
@@ -121,6 +129,9 @@
 <script setup>
 import { computed } from "vue";
 import { getComponentLabel } from "../utils/componentLabel.js";
+import { STATION_TYPES, getStationType, getComponentBounds, getComponentCenter } from "../utils/stations.js";
+import { getPathWidth } from "../utils/agvPath.js";
+import { RESIZABLE_COMPONENT_TYPES, getDefaultShadowColor } from "../utils/componentAppearance.js";
 
 const props = defineProps({
   // 当前选中的控件对象（由父组件根据 selectedId 查出后传入）
@@ -135,14 +146,22 @@ const props = defineProps({
   },
 });
 
-const RESIZABLE_COMPONENT_TYPES = new Set([
-  "workstation",
-  "parallelWorkstation",
-  "assemblyWorkstation",
-  "disassemblyWorkstation",
-  "buffer",
-]);
 const emit = defineEmits(["update-component-properties", "update-component-position"]);
+const shadowColor = computed(() => props.selectedItem?.shadowColor || getDefaultShadowColor(props.selectedItem?.type));
+const pathWidthInMeters = computed(() => props.selectedItem ? Number(getPathWidth(props.selectedItem).toFixed(2)) : 1);
+const handlePathWidthChange = (event) => {
+  const item = props.selectedItem;
+  if (item?.type !== "AGVpath") return;
+  const raw = event.target.value.trim();
+  const value = Number(raw);
+  const width = raw && Number.isFinite(value) ? Math.max(0.01, Number(value.toFixed(2))) : getPathWidth(item);
+  event.target.value = String(width);
+  if (width !== getPathWidth(item)) emit("update-component-properties", { id: item.id, pathWidth: width });
+};
+const stationStyle = computed(() => getStationType(props.selectedItem));
+const handleStationTypeChange = (event) => {
+  emit("update-component-properties", { id: props.selectedItem.id, stationType: event.target.value });
+};
 
 // 按 id 找出对象的显示名称（名称+序号），找不到则提示已删除
 const resolveLabel = (id) => {
@@ -158,14 +177,12 @@ const toLabel = computed(() =>
   props.selectedItem ? resolveLabel(props.selectedItem.toId) : "",
 );
 
-// 数据中 x/y 是左下角，输入框显示中心点；保留正负数和小数精度。
+// 站点存中心，其他控件存左下角；统一按 0.01m 精度显示中心，允许负坐标。
 const centerCoordinates = computed(() => {
   const item = props.selectedItem;
   if (!item || item.type === "connectionLine" || item.type === "AGVpath") return { x: 0, y: 0 };
-  return {
-    x: Number((item.x + (item.width ?? 0) / 2).toFixed(10)),
-    y: Number((item.y + (item.height ?? 0) / 2).toFixed(10)),
-  };
+  const center = getComponentCenter(item);
+  return { x: Number(center.x.toFixed(2)), y: Number(center.y.toFixed(2)) };
 });
 
 // 完成输入后提交；清空或尚未输完负号时不移动控件，失焦恢复原坐标。
@@ -173,15 +190,18 @@ const handleCenterCoordinateChange = (axis, event) => {
   const item = props.selectedItem;
   if (!item || item.type === "connectionLine" || item.type === "AGVpath") return;
   const rawValue = event.target.value.trim();
-  const value = Number(rawValue);
-  if (rawValue === "" || !Number.isFinite(value)) {
+  const inputValue = Number(rawValue);
+  if (rawValue === "" || !Number.isFinite(inputValue)) {
     event.target.value = String(centerCoordinates.value[axis]);
     return;
   }
+  const value = Number(inputValue.toFixed(2));
+  event.target.value = String(value);
   if (value === centerCoordinates.value[axis]) return;
   const position = { id: item.id, x: item.x, y: item.y };
   const dimension = axis === "x" ? "width" : "height";
-  position[axis] = Number((value - (item[dimension] ?? 0) / 2).toFixed(10));
+  const offset = item.type === "node" ? 0 : (item[dimension] ?? 0) / 2;
+  position[axis] = Number((value - offset).toFixed(10));
   // 共用拖动的更新事件，使站点关联的 AGV 路径也同步更新。
   emit("update-component-position", position);
 };
@@ -190,8 +210,8 @@ const isResizableComponent = computed(() =>
   Boolean(props.selectedItem && RESIZABLE_COMPONENT_TYPES.has(props.selectedItem.type)),
 );
 // 尺寸已直接以米存储，这里只做 2 位小数显示（与输入框 step 0.01 一致）
-const widthInMeters = computed(() => Number((props.selectedItem?.width || 0).toFixed(2)));
-const heightInMeters = computed(() => Number((props.selectedItem?.height || 0).toFixed(2)));
+const widthInMeters = computed(() => props.selectedItem ? Number(getComponentBounds(props.selectedItem).width.toFixed(2)) : 0);
+const heightInMeters = computed(() => props.selectedItem ? Number(getComponentBounds(props.selectedItem).height.toFixed(2)) : 0);
 
 const handleDimensionChange = (dimension, event) => {
   const inputValue = Number(event.target.value);
@@ -214,68 +234,30 @@ const handleShadowColorChange = (event) => {
   emit("update-component-properties", { id: props.selectedItem.id, shadowColor: event.target.value });
 };
 
-// AGV 路径的拐点数量（不包括起点和终点站点）
-const cornerCount = computed(() => {
-  const item = props.selectedItem;
-  if (!item || item.type !== "AGVpath") return 0;
-  return Math.max(0, (item.nodes?.length || 0) - 2);
-});
-
-// 拐点圆角半径显示（米，2 位小数）。cornerRadii 已直接存米，无需换算
-const fmtRadius = (radiusInMeters) => Number((radiusInMeters || 0).toFixed(2));
-
-// 检查圆角是否过大（radiusInMeters 与 nodes 均为米）
-const isCornerRadiusTooLarge = (cornerIndex, radiusInMeters) => {
-  const item = props.selectedItem;
-  if (!item || item.type !== "AGVpath" || !item.nodes) return false;
-
-  const nodes = item.nodes;
-  const actualIndex = cornerIndex + 1; // cornerRadii[0] 对应 nodes[1]
-
-  if (actualIndex < 1 || actualIndex >= nodes.length - 1) return false;
-
-  const prev = nodes[actualIndex - 1];
-  const curr = nodes[actualIndex];
-  const next = nodes[actualIndex + 1];
-
-  // 计算前后两段线段的长度
-  const dist1 = Math.hypot(curr.x - prev.x, curr.y - prev.y);
-  const dist2 = Math.hypot(next.x - curr.x, next.y - curr.y);
-
-  // 圆角半径不能超过任一线段长度的一半
-  const maxRadius = Math.min(dist1, dist2) / 2;
-
-  return radiusInMeters > maxRadius;
-};
-
-// 处理拐点圆角半径变化（单位为米）
-const handleCornerRadiusChange = (index, event) => {
-  const radiusInMeters = Number(event.target.value) || 0;
-  if (!props.selectedItem || !props.selectedItem.cornerRadii) return;
-
-  // 检查是否过大
-  if (isCornerRadiusTooLarge(index, radiusInMeters)) {
-    // 如果过大，计算最大允许值
-    const nodes = props.selectedItem.nodes;
-    const actualIndex = index + 1;
-    const prev = nodes[actualIndex - 1];
-    const curr = nodes[actualIndex];
-    const next = nodes[actualIndex + 1];
-    const dist1 = Math.hypot(curr.x - prev.x, curr.y - prev.y);
-    const dist2 = Math.hypot(next.x - curr.x, next.y - curr.y);
-    const maxRadius = Math.min(dist1, dist2) / 2;
-
-    // 设置为最大允许值
-    props.selectedItem.cornerRadii[index] = maxRadius;
-  } else {
-    // 直接修改响应式对象
-    props.selectedItem.cornerRadii[index] = Math.max(0, radiusInMeters);
-  }
-};
-
 </script>
 
 <style scoped>
+.path-direction-btn {
+  padding: 3px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 3px;
+  background: #f9fafb;
+  color: #047857;
+  cursor: pointer;
+}
+
+.station-type-select {
+  flex: 1;
+  min-width: 110px;
+}
+
+.station-color {
+  width: 28px;
+  height: 18px;
+  border: 2px solid;
+  border-radius: 2px;
+}
+
 .property-panel {
   display: flex;
   flex-direction: column;
@@ -418,62 +400,6 @@ const handleCornerRadiusChange = (index, event) => {
   flex: 1;
   color: #374151;
   word-break: break-all;
-}
-
-/* 拐点圆角输入行 */
-.corner-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.corner-input-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.corner-input {
-  flex: 1;
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 4px;
-  font-size: 13px;
-  color: #374151;
-  background-color: #ffffff;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.corner-input:focus {
-  border-color: #3b82f6;
-}
-
-.corner-input:hover {
-  border-color: #9ca3af;
-}
-
-.corner-input.corner-error {
-  border-color: #ef4444;
-  background-color: #fef2f2;
-}
-
-.corner-input.corner-error:focus {
-  border-color: #dc2626;
-}
-
-.corner-error-text {
-  font-size: 12px;
-  color: #ef4444;
-  padding-left: 68px;
-  margin-top: -2px;
-}
-
-.corner-unit {
-  flex: 0 0 auto;
-  color: #6b7280;
-  font-size: 13px;
-  user-select: none;
 }
 
 </style>

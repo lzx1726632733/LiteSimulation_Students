@@ -11,7 +11,6 @@ export const topBarMenus = [
       { id: 'open-model',  label: '打开模型' },
       { id: 'save',        label: '保存' },
       { id: 'save-as',     label: '另存为' },
-      { id: 'settings',    label: '设置',           dividerBefore: true },
       { id: 'close-model', label: '关闭当前模型',   dividerBefore: true },
     ],
   },

@@ -85,6 +85,8 @@ import DesignCanvas from './DesignCanvas.vue'
 import PropertyPanel from './PropertyPanel.vue'
 import ConsolePanel from './ConsolePanel.vue'
 import { getComponentLabel } from '../utils/componentLabel.js'
+import { STATION_TYPES, getStationType, getNextStationIndex, getComponentCenter } from '../utils/stations.js'
+import { getCornerMaxRadius } from '../utils/agvPath.js'
 
 // 定义 emit
 const emit = defineEmits(['placement-done'])
@@ -183,24 +185,48 @@ const handleUpdateComponentPosition = ({ id, x, y, nodes }) => {
   }
 }
 
-const handleUpdateComponentProperties = ({ id, width, height, shadowColor }) => {
+const handleUpdateComponentProperties = ({ id, width, height, shadowColor, stationType, pathWidth, cornerRadii, reverseDirection }) => {
   const target = placedComponents.value.find((item) => item.id === id)
   if (!target) return
 
-  const centerX = target.x + target.width / 2
-  const centerY = target.y + target.height / 2
+  if (target.type === 'AGVpath') {
+    if (Number.isFinite(pathWidth) && pathWidth > 0) target.pathWidth = Math.max(0.01, Number(pathWidth.toFixed(2)))
+    if (Array.isArray(cornerRadii)) {
+      target.cornerRadii = Array.from({ length: Math.max(0, (target.nodes?.length || 0) - 2) }, (_, i) =>
+        Number.isFinite(cornerRadii[i]) ? Math.max(0, cornerRadii[i]) : 0)
+      clampAGVPathCornerRadii(target)
+    }
+    if (reverseDirection) {
+      target.nodes = [...(target.nodes || [])].reverse()
+      target.cornerRadii = [...(target.cornerRadii || [])].reverse()
+      if (target.segments) target.segments = [...target.segments].reverse()
+      ;[target.fromId, target.toId] = [target.toId, target.fromId]
+      ;[target.fromName, target.toName] = [target.toName, target.fromName]
+    }
+    return
+  }
+
+  const { x: centerX, y: centerY } = getComponentCenter(target)
   const nextWidth = Number.isFinite(width) ? width : target.width
   const nextHeight = Number.isFinite(height) ? height : target.height
 
   if (Number.isFinite(width)) {
     target.width = nextWidth
-    target.x = centerX - nextWidth / 2
+    target.x = target.type === 'node' ? centerX : centerX - nextWidth / 2
   }
   if (Number.isFinite(height)) {
     target.height = nextHeight
-    target.y = centerY - nextHeight / 2
+    target.y = target.type === 'node' ? centerY : centerY - nextHeight / 2
   }
   if (typeof shadowColor === 'string') target.shadowColor = shadowColor
+  const station = STATION_TYPES.find((type) => type.value === stationType)
+  if (target.type === 'node' && station) {
+    if (getStationType(target).value !== station.value) {
+      target.index = getNextStationIndex(placedComponents.value, station.value, target.id)
+    }
+    target.stationType = station.value
+    target.name = station.label
+  }
 }
 
 // 多选拖动先同时更新控件，再同步站点关联路径，避免中间状态误缩小圆角。
@@ -234,7 +260,7 @@ const handleUpdateComponentPositions = (positions) => {
   })
 }
 
-// 修正 AGV 路径所有拐点的圆角：若某个圆角超出前后线段长度之半，自动缩到允许的最大值
+// 结合转弯角度和相邻线段长度，限制圆弧半径，避免相邻圆弧交叠。
 const clampAGVPathCornerRadii = (component) => {
   if (!component.cornerRadii || !component.nodes) return
 
@@ -243,15 +269,7 @@ const clampAGVPathCornerRadii = (component) => {
     if (radius === 0) return
 
     // cornerRadii[i] 对应 nodes[i+1]（第 i 个拐点，不含起终点）
-    const nodeIdx = i + 1
-    const prev = component.nodes[nodeIdx - 1]
-    const curr = component.nodes[nodeIdx]
-    const next = component.nodes[nodeIdx + 1]
-    if (!prev || !curr || !next) return
-
-    const dist1 = Math.hypot(curr.x - prev.x, curr.y - prev.y)
-    const dist2 = Math.hypot(next.x - curr.x, next.y - curr.y)
-    const maxRadius = Math.min(dist1, dist2) / 2
+    const maxRadius = getCornerMaxRadius(component.nodes, i)
 
     if (radius > maxRadius) {
       component.cornerRadii[i] = maxRadius
@@ -359,7 +377,7 @@ const handleKeyDown = (e) => {
   // 正在输入框中编辑时不触发删除
   const target = e.target
   const tag = target && target.tagName
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || (target && target.isContentEditable)) {
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (target && target.isContentEditable)) {
     return
   }
 

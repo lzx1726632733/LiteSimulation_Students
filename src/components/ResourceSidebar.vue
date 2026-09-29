@@ -26,7 +26,7 @@
         {{ searchQuery ? "未找到匹配的对象" : "暂无对象，请在画布中放置控件" }}
       </div>
 
-      <!-- 分类 → 类型 → 实例 三级树 -->
+      <!-- 分类 → 控件类型 → 实例；站点额外按用途分组 -->
       <ul v-else class="tree-root">
         <li v-for="category in treeData" :key="category.tabId" class="tree-node">
           <!-- 一级：分类（tab） -->
@@ -57,25 +57,42 @@
                 v-show="!isCollapsed(`${category.tabId}:${group.type}`)"
                 class="tree-children"
               >
-                <!-- 三级：具体实例 -->
-                <li
-                  v-for="instance in group.instances"
-                  :key="instance.id"
-                  class="tree-row instance-row"
-                  :class="{ selected: selectedIds.includes(instance.id) || instance.id === selectedId }"
-                  @click="selectInstance(instance.id, $event)"
-                  @dblclick="emit('focus-component', instance.id)"
-                >
-                  <img class="tree-icon" :src="instance.icon" :alt="instance.name" />
-                  <span class="tree-label">{{ getComponentLabel(instance) }}</span>
-                  <button
-                    class="delete-btn"
-                    title="删除"
-                    @click.stop="removeInstance(instance.id)"
-                    @dblclick.stop
+                <li v-for="section in group.sections" :key="section.key" class="tree-node">
+                  <div
+                    v-if="section.stationType"
+                    class="tree-row station-type-row"
+                    @click="toggleNode(`${category.tabId}:${section.key}`)"
                   >
-                    ×
-                  </button>
+                    <span class="tree-arrow" :class="{ expanded: !isCollapsed(`${category.tabId}:${section.key}`) }">▶</span>
+                    <span class="tree-icon station-icon" :style="{ backgroundColor: section.fill, borderColor: section.color }" aria-hidden="true"></span>
+                    <span class="tree-label">{{ section.name }}</span>
+                    <span class="tree-count" :style="{ backgroundColor: section.fill, color: section.color }">{{ section.instances.length }}</span>
+                  </div>
+                  <ul
+                    v-show="!section.stationType || !isCollapsed(`${category.tabId}:${section.key}`)"
+                    :class="section.stationType ? 'tree-children' : 'tree-root'"
+                  >
+                    <li
+                      v-for="instance in section.instances"
+                      :key="instance.id"
+                      class="tree-row instance-row"
+                      :class="{ selected: selectedIds.includes(instance.id) || instance.id === selectedId }"
+                      @click="selectInstance(instance.id, $event)"
+                      @dblclick="emit('focus-component', instance.id)"
+                    >
+                      <span v-if="section.stationType" class="tree-icon station-icon" :style="{ backgroundColor: section.fill, borderColor: section.color }" aria-hidden="true"></span>
+                      <img v-else class="tree-icon" :src="instance.icon" :alt="instance.name" />
+                      <span class="tree-label">{{ getComponentLabel(instance) }}</span>
+                      <button
+                        class="delete-btn"
+                        title="删除"
+                        @click.stop="removeInstance(instance.id)"
+                        @dblclick.stop
+                      >
+                        ×
+                      </button>
+                    </li>
+                  </ul>
                 </li>
               </ul>
             </li>
@@ -90,6 +107,7 @@
 import { ref, computed } from "vue";
 import { tabList, menuControls } from "/src/config/controlMenuData.js";
 import { getComponentLabel } from "../utils/componentLabel.js";
+import { STATION_TYPES, getStationType } from "../utils/stations.js";
 
 // 接收父组件维护的已放置控件（单一数据源）与当前选中项
 const props = defineProps({
@@ -128,7 +146,7 @@ const toggleNode = (key) => {
   collapsedKeys.value = next;
 };
 
-// 按 controlMenuData.js 的顺序构建三级树，仅包含实际放置了控件的分类/类型
+// 保持菜单顺序；站点按用途分组，各分类内按独立序号排序。
 const treeData = computed(() => {
   const keyword = searchQuery.value.trim().toLowerCase();
 
@@ -139,26 +157,35 @@ const treeData = computed(() => {
       const types = controls
         .map((control) => {
           // 该类型下已放置的实例，按序号排序
-          let instances = props.placedComponents
+          const allInstances = props.placedComponents
             .filter((item) => item.type === control.type)
             .slice()
             .sort((a, b) => a.index - b.index);
 
-          // 搜索过滤：匹配 “名称+序号” 或 类型名
-          if (keyword) {
-            const typeMatched = control.name.toLowerCase().includes(keyword);
-            if (!typeMatched) {
-              instances = instances.filter((item) =>
-                getComponentLabel(item).toLowerCase().includes(keyword),
-              );
-            }
-          }
+          const sections = (control.type === "node"
+            ? STATION_TYPES.map((station) => ({
+              key: `node:${station.value}`,
+              stationType: station.value,
+              name: station.label,
+              color: station.color,
+              fill: station.fill,
+              instances: allInstances.filter((item) => getStationType(item).value === station.value),
+            }))
+            : [{ key: control.type, name: control.name, instances: allInstances }])
+            .map((section) => ({
+              ...section,
+              instances: !keyword || control.name.toLowerCase().includes(keyword) || section.name.toLowerCase().includes(keyword)
+                ? section.instances
+                : section.instances.filter((item) => getComponentLabel(item).toLowerCase().includes(keyword)),
+            }))
+            .filter((section) => section.instances.length > 0);
 
           return {
             type: control.type,
             name: control.name,
             icon: control.icon,
-            instances,
+            instances: sections.flatMap((section) => section.instances),
+            sections,
           };
         })
         .filter((group) => group.instances.length > 0);
@@ -344,6 +371,18 @@ const refreshResources = () => {
   flex-shrink: 0;
   pointer-events: none;
   -webkit-user-drag: none;
+}
+
+/* 站点分类和实例使用与画布相同的矩形颜色标识。 */
+.station-icon {
+  height: 12px;
+  border: 2px solid;
+  border-radius: 2px;
+  box-sizing: border-box;
+}
+
+.station-type-row .tree-label {
+  font-weight: 500;
 }
 
 /* 文本标签 */
