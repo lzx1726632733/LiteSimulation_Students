@@ -21,6 +21,20 @@ const componentAppearance = vm.runInNewContext(fs.readFileSync(
 const alignBounds = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/alignment.js'), 'utf8',
 ).replace('export const alignBounds', 'const alignBounds') + '\n;alignBounds');
+const inputRules = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/inputRules.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({INPUT_PROPERTY_DEFAULTS,isValidInputProperty,parseGenerationInterval,formatGenerationInterval,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
+const createInputSimulation = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/inputSimulation.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace('export function ', 'function ') + '\n;createInputSimulation', {
+  ...inputRules, ...componentAppearance, getComponentLabel: item => `${item.name}${item.index}`,
+  getConnectionGeometry: (...args) => connectionGeometry.getConnectionGeometry(...args), DEFAULT_WORKPIECE_SPEED: 1,
+});
+const connectionGeometry = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/connectionLine.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export (const|function) /g, '$1 ') +
+  '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry})', stations);
 
 // Run the actual component handlers with Vue reactivity and a small DOM/canvas stub.
 // No test-only exports or alternate coordinate implementation are added to production.
@@ -84,13 +98,13 @@ function createCanvas(items = []) {
       disconnect() {}
     },
   };
-  const script = descriptor.scriptSetup.content.replace(/^import .*;\r?$/gm, '');
+  const script = descriptor.scriptSetup.content.replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?$/gm, '');
   const exports = `({ canvas, canvasContainer, ppm, viewOrigin, canvasWidth, canvasHeight,
     alignmentGuides, cursorX, cursorY,
     metersPerCell, panning, selectionBox, isComponentSelected, imageCache, handleWheel, resetZoom, focusComponent,
     handleMouseDown, handleMouseMove, handleMouseUp, handleMouseEnter, handleMouseLeave,
     handleCanvasKeyDown, handlePointerCancel, handleWindowBlur, getCanvasMousePosition,
-    drawGridNow, dragging, draggingCorner, editingId, labelRects, labelEditorStyle,
+    drawGridNow, drawWorkpieces, hitTestWorkpiece, workpieceTooltipAnchor, dragging, draggingCorner, editingId, labelRects, labelEditorStyle,
     hitTestComponent, hitTestLabel, resolveLineEndpoints, hitTestConnectionLine, hitTestAGVPath,
   })`;
   const scope = vue.effectScope();
@@ -104,7 +118,7 @@ function createCanvas(items = []) {
     clientY: 100 + (api.viewOrigin.value.y - worldY) * api.ppm.value,
     button: 0, pointerId: 1, preventDefault() {}, ...extra,
   });
-  return { api, props, events, element, container, pointer, resize: () => resize(),
+  return { api, props, events, element, container, pointer, window: sandbox.window, resize: () => resize(),
     dispose() { cleanup.forEach((callback) => callback()); scope.stop(); },
   };
 }
@@ -114,6 +128,132 @@ const buffer = (overrides = {}) => ({
   x: 10, y: 10, width: 3, height: 3, ...overrides,
 });
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
+
+test('workpieces render their physical bounds, rule color and red border at the current zoom', () => {
+  const scene = createCanvas();
+  scene.props.workpieces = [{x: 2, y: 3, width: 4, height: 1, sequence: 1, fillColor: '#123456', borderColor: '#ff0000'}];
+  scene.api.ppm.value = 20;
+  const calls = [];
+  const ctx = new Proxy({
+    fillRect(...args) { calls.push(['fill', this.fillStyle, ...args]); },
+    strokeRect(...args) { calls.push(['border', this.strokeStyle, ...args]); },
+  }, {get: (target, key) => target[key] ?? (() => {})});
+  scene.api.drawWorkpieces(ctx);
+  assert.deepEqual(calls, [['fill', '#123456', 40, -80, 80, 20], ['border', '#ff0000', 40, -80, 80, 20]]);
+  scene.dispose();
+});
+
+test('hidden stack workpieces do not render or expand fit-all, and the front displays the total', () => {
+  const scene = createCanvas();
+  scene.props.workpieces = Array.from({length: 30}, (_, index) => ({
+    x: index < 25 ? 2 : 1000000, y: 3, width: 4, height: 1, sequence: index + 1,
+    stackHidden: index >= 25, stackCount: index === 24 ? 30 : undefined,
+    fillColor: '#22c55e', borderColor: '#ff0000',
+  }));
+  scene.api.ppm.value = 20;
+  let rectangles = 0;
+  const labels = [];
+  const ctx = new Proxy({
+    fillRect() { rectangles++; },
+    fillText(text) { labels.push(text); },
+  }, {get: (target, key) => target[key] ?? (() => {})});
+  scene.api.drawWorkpieces(ctx);
+  assert.equal(rectangles, 25);
+  assert.equal(labels.at(-1), '30');
+  scene.api.resetZoom();
+  assert.ok(scene.api.ppm.value >= 20);
+  scene.dispose();
+});
+
+test('moving workpieces rotate around their center with a red border', () => {
+  const scene = createCanvas();
+  scene.props.workpieces = [{x: 9, y: 9.5, position: {x: 10, y: 10}, width: 2, height: 1,
+    angle: 90, sequence: 1, fillColor: '#22c55e', borderColor: '#ff0000'}];
+  scene.api.ppm.value = 20;
+  const calls = [];
+  const ctx = new Proxy({
+    translate(...args) { calls.push(['translate', ...args]); },
+    rotate(radians) { calls.push(['rotate', radians]); },
+    fillRect(...args) { calls.push(['fill', ...args]); },
+    strokeRect(...args) { calls.push(['border', this.strokeStyle, ...args]); },
+  }, {get: (target, key) => target[key] ?? (() => {})});
+  scene.api.drawWorkpieces(ctx);
+  assert.deepEqual(calls, [['translate', 200, -200], ['rotate', -Math.PI / 2],
+    ['fill', -20, -10, 40, 20], ['border', '#ff0000', -20, -10, 40, 20]]);
+  scene.dispose();
+});
+
+test('workpiece hit testing respects rotation, topmost drawing order and hidden stack entries', () => {
+  const scene = createCanvas();
+  const first = {id: 'first', position: {x: 0, y: 0}, width: 4, height: 1, angle: 90};
+  const second = {...first, id: 'second', width: 1, height: 1};
+  scene.props.workpieces = [first, second, {...second, id: 'hidden', stackHidden: true}];
+  assert.equal(scene.api.hitTestWorkpiece(0, 0).id, 'second');
+  assert.equal(scene.api.hitTestWorkpiece(.4, 1.8).id, 'first');
+  assert.equal(scene.api.hitTestWorkpiece(1.8, .4), null);
+  scene.dispose();
+});
+
+function installWorkpieceTooltip(scene) {
+  const calls = [];
+  scene.api.workpieceTooltipAnchor.value = vue.markRaw({style: {}});
+  scene.window.bootstrap = {Tooltip: class {
+    constructor(element, options) { calls.push({type: 'create', options}); }
+    setContent(content) { calls.push({type: 'content', text: content['.tooltip-inner']}); }
+    show() { calls.push({type: 'show'}); }
+    hide() { calls.push({type: 'hide'}); }
+    update() { calls.push({type: 'update'}); }
+    dispose() { calls.push({type: 'dispose'}); }
+  }};
+  return calls;
+}
+
+test('hover shows the correct source immediately for identical part numbers and safely updates names', () => {
+  const scene = createCanvas([buffer({id: 'a', name: '输入', index: 1}), buffer({id: 'b', name: '输入', index: 2})]);
+  const calls = installWorkpieceTooltip(scene);
+  scene.props.workpieces = [
+    {id: 'p1', status: 'moving', sourceId: 'a', sequence: 1, position: {x: 0, y: 0}, width: 2, height: 1},
+    {id: 'p2', status: 'moving', sourceId: 'b', sequence: 1, position: {x: 5, y: 0}, width: 2, height: 1},
+  ];
+  scene.api.handleMouseMove(scene.pointer(0, 0));
+  assert.equal(calls.filter(call => call.type === 'show').length, 1);
+  assert.equal(calls.find(call => call.type === 'content').text, '输入1');
+  const options = calls.find(call => call.type === 'create').options;
+  assert.equal(options.delay, 0);
+  assert.equal(options.animation, false);
+  assert.equal(options.html, false);
+  scene.api.handleMouseMove(scene.pointer(5, 0));
+  assert.equal(calls.filter(call => call.type === 'content').at(-1).text, '输入2');
+  scene.props.placedComponents[1].displayName = '<b>新输入</b>';
+  scene.api.drawGridNow();
+  assert.equal(calls.filter(call => call.type === 'content').at(-1).text, '<b>新输入</b>');
+  scene.api.handleMouseLeave();
+  assert.equal(calls.at(-1).type, 'hide');
+  scene.dispose();
+  assert.equal(calls.at(-1).type, 'dispose');
+});
+
+test('a moving workpiece entering or leaving a stationary pointer updates its tooltip on redraw', () => {
+  const scene = createCanvas([buffer({id: 'a', name: '输入', index: 1})]);
+  const calls = installWorkpieceTooltip(scene);
+  scene.api.handleMouseMove(scene.pointer(0, 0));
+  assert.equal(calls.filter(call => call.type === 'show').length, 0);
+  scene.props.workpieces = [{id: 'part', status: 'moving', sourceId: 'a', position: {x: 0, y: 0},
+    x: -1, y: -.5, width: 2, height: 1, sequence: 1, angle: 0}];
+  scene.api.drawGridNow();
+  assert.equal(calls.filter(call => call.type === 'show').length, 1);
+  for (const status of ['stacked', 'waiting', 'completed']) {
+    scene.props.workpieces[0].status = status;
+    scene.api.drawGridNow();
+    scene.api.handleMouseMove(scene.pointer(0, 0));
+    assert.equal(calls.at(-1).type, 'hide');
+    assert.equal(calls.filter(call => call.type === 'show').length, 1);
+  }
+  scene.props.workpieces = [];
+  scene.api.drawGridNow();
+  assert.equal(calls.at(-1).type, 'hide');
+  scene.dispose();
+});
 
 test('straight AGV areas use physical width and flat rectangular ends', () => {
   const route = { nodes: [{ x: 0, y: 0 }, { x: 10, y: 0 }], pathWidth: 2 };
@@ -911,15 +1051,142 @@ test('Y-up rendering keeps labels, editing positions and connection hit tests al
 
 function loadComponent(name, bindings, exposed) {
   const file = path.resolve(__dirname, `../src/components/${name}.vue`);
-  const script = parse(fs.readFileSync(file, 'utf8')).descriptor.scriptSetup.content.replace(/^import .*\r?$/gm, '');
+  const script = parse(fs.readFileSync(file, 'utf8')).descriptor.scriptSetup.content
+    .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?$/gm, '');
   return vm.runInNewContext(`${script}\n;({ ${exposed} })`, {
     ...agvGeometry,
     ...stations,
     ...componentAppearance,
-    ...vue, onMounted() {}, onBeforeUnmount() {}, defineExpose() {},
+    ...inputRules, ...connectionGeometry, createInputSimulation, createBootstrapTooltipDirective: () => ({}),
+    ...vue, onMounted() {}, onUnmounted() {}, onBeforeUnmount() {}, defineExpose() {},
     defineEmits: () => () => {}, ...bindings,
   });
 }
+
+test('connection length uses component centers and is unchanged by resizing around those centers', () => {
+  const from = buffer({id: 'from', x: -53, y: -14, width: 100, height: 20});
+  const to = buffer({id: 'to', x: -.5, y: -40, width: 1, height: 80});
+  const line = {type: 'connectionLine', fromId: 'from', toId: 'to'};
+  near(connectionGeometry.getConnectionGeometry(line, [from, to]).length, 5);
+  from.width = 200;
+  from.x -= 50;
+  to.height = 500;
+  to.y -= 210;
+  near(connectionGeometry.getConnectionGeometry(line, [from, to]).length, 5);
+  assert.equal(connectionGeometry.getConnectionGeometry(line, [from]), null);
+});
+
+test('connection angle follows the positive X and Y axes and preserves equivalent signed angles', () => {
+  const from = {id: 'from', x: 0, y: 0};
+  const to = {id: 'to', x: 1, y: 0};
+  const line = {type: 'connectionLine', fromId: 'from', toId: 'to'};
+  for (const [x, y, angle] of [[1, 0, 0], [0, 1, 90], [-1, 0, 180], [0, -1, -90]]) {
+    Object.assign(to, {x, y});
+    near(connectionGeometry.getConnectionGeometry(line, [from, to]).angle, angle);
+  }
+  line.angle = 270;
+  near(connectionGeometry.getConnectionGeometry(line, [from, to]).angle, 270);
+  Object.assign(to, {x: 1, y: 1});
+  near(connectionGeometry.getConnectionGeometry(line, [from, to]).angle, 45);
+});
+
+test('editing connection length or angle moves only its endpoint and speed is stored independently', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties, handleComponentPlaced');
+  workspace.placedComponents.value.push(
+    buffer({id: 'from', x: 0, y: 0}), buffer({id: 'to', x: 3, y: 4}), buffer({id: 'other', x: 20, y: 30}),
+  );
+  workspace.handleComponentPlaced({id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'});
+  const [from, to, other, line] = workspace.placedComponents.value;
+  assert.equal(line.workpieceSpeed, 1);
+  assert.equal(line.affectedEndpoint, 'to');
+  workspace.handleUpdateComponentProperties({id: 'line', length: 10});
+  near(to.x, 6); near(to.y, 8);
+  workspace.handleUpdateComponentProperties({id: 'line', angle: 90});
+  near(to.x, 0); near(to.y, 10);
+  workspace.handleUpdateComponentProperties({id: 'line', angle: -360});
+  near(to.x, 10); near(to.y, 0);
+  assert.equal(connectionGeometry.getConnectionGeometry(line, workspace.placedComponents.value).angle, -360);
+  workspace.handleUpdateComponentProperties({id: 'line', workpieceSpeed: 2.5});
+  assert.equal(line.workpieceSpeed, 2.5);
+  assert.equal(from.x, 0); assert.equal(from.y, 0);
+  assert.equal(other.x, 20); assert.equal(other.y, 30);
+});
+
+test('choosing the start endpoint preserves line direction and fixes the end center for unequal component sizes', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(
+    buffer({id: 'from', x: 0, y: 0, width: 2, height: 4}),
+    buffer({id: 'to', x: 5, y: 6, width: 4, height: 8}),
+    {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'},
+    {id: 'other-line', type: 'connectionLine', fromId: 'from', toId: 'to'},
+  );
+  const [from, to, line, otherLine] = workspace.placedComponents.value;
+  const props = vue.reactive({selectedItem: line, placedComponents: workspace.placedComponents.value});
+  const properties = loadComponent('PropertyPanel', {defineProps: () => props}, 'connectionAffectedEndpoint');
+  assert.equal(properties.connectionAffectedEndpoint.value, 'to');
+  workspace.handleUpdateComponentProperties({id: 'line', affectedEndpoint: 'from'});
+  assert.equal(properties.connectionAffectedEndpoint.value, 'from');
+  near(from.x, 0); near(from.y, 0);
+  workspace.handleUpdateComponentProperties({id: 'line', length: 5});
+  near(from.x, 3); near(from.y, 4);
+  workspace.handleUpdateComponentProperties({id: 'line', angle: 90});
+  near(from.x, 6); near(from.y, 3);
+  workspace.handleUpdateComponentProperties({id: 'line', angle: -360});
+  near(from.x, 1); near(from.y, 8);
+  workspace.handleUpdateComponentProperties({id: 'line', length: 0});
+  near(from.x, 6); near(from.y, 8);
+  workspace.handleUpdateComponentProperties({id: 'line', length: 3});
+  near(from.x, 3); near(from.y, 8);
+  workspace.handleUpdateComponentProperties({id: 'line', workpieceSpeed: 4});
+  assert.equal(line.workpieceSpeed, 4);
+  near(from.x, 3); near(from.y, 8);
+  near(to.x, 5); near(to.y, 6);
+  workspace.handleUpdateComponentProperties({id: 'line', affectedEndpoint: 'invalid'});
+  assert.equal(line.affectedEndpoint, 'from');
+  props.selectedItem = otherLine;
+  assert.equal(properties.connectionAffectedEndpoint.value, 'to');
+  workspace.handleUpdateComponentProperties({id: 'line', affectedEndpoint: 'to', length: 6});
+  near(from.x, 3); near(from.y, 8);
+  near(to.x, 8); near(to.y, 6);
+});
+
+test('connection geometry edits reject invalid numbers and retain direction through zero length', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(buffer({id: 'from', x: 0, y: 0}), buffer({id: 'to', x: 0, y: 5}),
+    {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'});
+  const to = workspace.placedComponents.value[1];
+  for (const change of [{length: -1}, {length: Infinity}, {angle: 361}, {angle: NaN}, {workpieceSpeed: -1}]) {
+    workspace.handleUpdateComponentProperties({id: 'line', ...change});
+    near(to.x, 0); near(to.y, 5);
+  }
+  workspace.handleUpdateComponentProperties({id: 'line', length: 0});
+  near(to.x, 0); near(to.y, 0);
+  workspace.handleUpdateComponentProperties({id: 'line', length: 7});
+  near(to.x, 0); near(to.y, 7);
+});
+
+test('connection property fields update the parent without duplicate blur updates or rounding untouched lengths', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(buffer({id: 'from', x: 0, y: 0}), buffer({id: 'to', x: 1, y: 1}),
+    {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'});
+  const events = [];
+  const properties = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: workspace.placedComponents.value[2], placedComponents: workspace.placedComponents.value}),
+    defineEmits: () => (_, payload) => { events.push(payload); workspace.handleUpdateComponentProperties(payload); },
+  }, 'connectionLength, connectionAngle, connectionWorkpieceSpeed, handleConnectionPropertyChange');
+  assert.equal(properties.connectionLength.value, 1.41);
+  properties.handleConnectionPropertyChange('length', {target: {value: '1.41'}});
+  assert.equal(events.length, 0);
+  properties.handleConnectionPropertyChange('length', {target: {value: '10'}});
+  properties.handleConnectionPropertyChange('length', {target: {value: '10'}});
+  assert.equal(events.length, 1);
+  near(connectionGeometry.getConnectionGeometry(workspace.placedComponents.value[2], workspace.placedComponents.value).length, 10);
+  const invalid = {value: '400'};
+  properties.handleConnectionPropertyChange('angle', {target: invalid});
+  assert.equal(invalid.value, '45');
+  properties.handleConnectionPropertyChange('workpieceSpeed', {target: {value: '0'}});
+  assert.equal(properties.connectionWorkpieceSpeed.value, 0);
+});
 
 test('system input and output have distinct shaded rectangles and editable physical dimensions', () => {
   const cases = [

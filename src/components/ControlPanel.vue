@@ -37,7 +37,7 @@ const activeKey = ref(tabList[0].id);
 // 控制面板是否展开，默认打开
 const panelVisible = ref(true);
 // 当前选中的控件，格式: "tabId-controlId"
-// 初始化时选中第一个tab的第一个控件
+// 初始化时选中第一个tab的第一个控件："commonControl-1"
 const firstControl = menuControls[tabList[0].id]?.[0];
 const activeControlId = ref(firstControl ? `${tabList[0].id}-${firstControl.id}` : null);
 
@@ -48,7 +48,7 @@ const activeControlInfo = computed(() => {
     const [tabId, controlId] = activeControlId.value.split('-');
     const controls = menuControls[tabId];
     if (!controls) return null;
-
+    // parseInt('1') // 2 , find会遍历controls数组，c为其元素
     const control = controls.find(c => c.id === parseInt(controlId));
     if (!control) return null;
 

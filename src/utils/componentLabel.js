@@ -4,12 +4,11 @@
 // 结果存在 displayName 上并优先使用。改名只影响显示，不动 name/index，
 // 因此序号复用（getNextIndexForType）等逻辑不受影响。
 export const getComponentLabel = (component) => {
+  console.log('component=',component)
   if (!component) return "";
-
   const custom = component.displayName;
   if (typeof custom === "string" && custom.trim() !== "") {
     return custom.trim();
   }
-
   return `${component.name}${component.index}`;
 };

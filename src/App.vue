@@ -7,9 +7,10 @@ import ControlPanel from './components/ControlPanel.vue'
 import WorkspaceLayout from './components/WorkspaceLayout.vue'
 import BottomBar from './components/BottomBar.vue'
 
-// 引用
+// 引用，获取组件实例对象
 const workspaceLayoutRef = ref(null)
 const controlPanelRef = ref(null)
+const simulationStatus = ref('not-started')
 
 // 处理控件变化
 const handleControlChange = (controlInfo) => {
@@ -34,8 +35,9 @@ const handleMenuAction = (id) => {
         <TopBar @menu-action="handleMenuAction"></TopBar>
         <TopToolbar></TopToolbar>
         <ControlPanel ref="controlPanelRef" @control-change="handleControlChange"></ControlPanel>
-        <WorkspaceLayout ref="workspaceLayoutRef" @placement-done="handlePlacementDone"></WorkspaceLayout>
-        <BottomBar></BottomBar>
+        <WorkspaceLayout ref="workspaceLayoutRef" @placement-done="handlePlacementDone"
+                         @simulation-status-change="simulationStatus = $event"></WorkspaceLayout>
+        <BottomBar :simulation-status="simulationStatus"></BottomBar>
     </Background>
 </template>
 
