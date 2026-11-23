@@ -39,3 +39,21 @@ export const getComponentCenter = (component) => {
   if (component.type === "node") return { x: component.x, y: component.y };
   return { x: component.x + (component.width ?? 0) / 2, y: component.y + (component.height ?? 0) / 2 };
 };
+
+// 一个单位表示顺时针转 90°。模型坐标和本地尺寸仍按未旋转矩形存储。
+export const getComponentQuarterTurns = (component) => {
+  const turns = component.quarterTurns;
+  return Number.isInteger(turns) ? ((turns % 4) + 4) % 4 : 0;
+};
+
+export const getComponentFootprint = (component) => {
+  const bounds = getComponentBounds(component);
+  if (getComponentQuarterTurns(component) % 2 === 0) return bounds;
+  const {x, y} = getComponentCenter(component);
+  return {
+    x: x - bounds.height / 2,
+    y: y - bounds.width / 2,
+    width: bounds.height,
+    height: bounds.width,
+  };
+};

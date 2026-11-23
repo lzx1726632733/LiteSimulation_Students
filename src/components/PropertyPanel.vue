@@ -61,6 +61,19 @@
                                @blur="handleDimensionBlur('height', $event)"/>
                         <span class="property-unit">m</span>
                     </div>
+                    <div class="prop-row">
+                        <span class="prop-key">方向调整</span>
+                        <div class="rotation-buttons">
+                            <button type="button" title="顺时针旋转 90°" aria-label="顺时针旋转 90°"
+                                    @click="rotateSelectedComponent(1)">
+                                <img :src="clockwiseIcon" alt="" draggable="false"/>
+                            </button>
+                            <button type="button" title="逆时针旋转 90°" aria-label="逆时针旋转 90°"
+                                    @click="rotateSelectedComponent(-1)">
+                                <img :src="anticlockwiseIcon" alt="" draggable="false"/>
+                            </button>
+                        </div>
+                    </div>
                     <div v-if="selectedItem.type !== 'node'" class="prop-row dimension-row">
                         <span class="prop-key">阴影颜色</span>
                         <input class="color-input" type="color" :value="shadowColor" @input="handleShadowColorChange"/>
@@ -83,7 +96,7 @@
                     <div class="prop-row dimension-row">
                         <span id="connection-affected-endpoint-label" class="prop-key">更改时影响</span>
                         <div class="connection-endpoint-options" role="radiogroup" aria-labelledby="connection-affected-endpoint-label"
-                             title="仅修改实际长度和角度时移动所选端组件">
+                             title="编辑直线长度或角度时，调整所选一端。折线首段固定起点，末段固定终点。">
                             <label v-for="option in connectionEndpointOptions" :key="option.value" class="square-radio-label">
                                 <input type="radio" class="square-radio" :name="`connection-endpoint-${selectedItem.id}`"
                                        :value="option.value" :checked="connectionAffectedEndpoint === option.value"
@@ -91,26 +104,6 @@
                                 {{ option.label }}
                             </label>
                         </div>
-                    </div>
-                    <div class="prop-row dimension-row">
-                        <label class="prop-key" for="connection-length">实际长度</label>
-                        <input id="connection-length" class="property-input" type="number" min="0" step="0.01"
-                               :value="connectionLength" :disabled="!connectionGeometry"
-                               title="按起点和终点组件的中心坐标计算，单位为米"
-                               @change="handleConnectionPropertyChange('length', $event)"
-                               @blur="handleConnectionPropertyChange('length', $event)"
-                               @keydown.enter.prevent="$event.target.blur()"/>
-                        <span class="property-unit">m</span>
-                    </div>
-                    <div class="prop-row dimension-row">
-                        <label class="prop-key" for="connection-angle">角度</label>
-                        <input id="connection-angle" class="property-input" type="number" min="-360" max="360" step="0.01"
-                               :value="connectionAngle" :disabled="!connectionGeometry"
-                               title="+X 方向为 0°，+Y 方向为 90°，范围 -360°～360°"
-                               @change="handleConnectionPropertyChange('angle', $event)"
-                               @blur="handleConnectionPropertyChange('angle', $event)"
-                               @keydown.enter.prevent="$event.target.blur()"/>
-                        <span class="property-unit">°</span>
                     </div>
                     <div class="prop-row dimension-row">
                         <label class="prop-key" for="connection-workpiece-speed">工件速度</label>
@@ -121,6 +114,54 @@
                                @keydown.enter.prevent="$event.target.blur()"/>
                         <span class="property-unit">m/s</span>
                     </div>
+                    <div class="section-title connection-table-title">线条参数</div>
+                    <table class="connection-table">
+                        <thead>
+                            <tr>
+                                <th scope="col">序号</th>
+                                <th scope="col">类型</th>
+                                <th scope="col" title="长度、半径和画布坐标的单位均为米">物理参数</th>
+                                <th scope="col" title="正 X 方向为 0°，正 Y 方向为 90°">角度</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(row, i) in connectionGeometry?.rows" :key="i"
+                                :class="{'connection-corner-row': row.type !== 'Line'}"
+                                :tabindex="row.type !== 'Line' ? 0 : undefined"
+                                :title="row.type !== 'Line' ? '双击编辑圆弧半径' : undefined"
+                                @dblclick="row.type !== 'Line' && openConnectionRadius(row)"
+                                @keydown.enter.self.prevent="row.type !== 'Line' && openConnectionRadius(row)">
+                                <td>{{ i + 1 }}</td>
+                                <td>{{ row.type }}</td>
+                                <template v-if="row.type === 'Line'">
+                                    <td v-for="field in ['length', 'angle']" :key="field"
+                                        :title="field === 'length' ? '双击编辑长度（米）' : '双击编辑角度（°）'"
+                                        :tabindex="isEditingConnectionCell(row, field) ? undefined : 0"
+                                        @dblclick="startConnectionCellEdit(row, field)"
+                                        @keydown.enter.self.prevent="startConnectionCellEdit(row, field)">
+                                        <input v-if="isEditingConnectionCell(row, field)" class="property-input connection-cell-input"
+                                               type="number" step="any" :min="field === 'angle' ? -360 : 0"
+                                               :max="field === 'angle' ? 360 : undefined" :value="connectionCellEdit.value"
+                                               :aria-label="field === 'length' ? '直线长度（米）' : '直线角度（°）'"
+                                               @vue:mounted="focusConnectionCell"
+                                               @input="connectionCellEdit.value = $event.target.value"
+                                               @blur="saveConnectionCellEdit"
+                                               @keydown.enter.stop.prevent="$event.target.blur()"
+                                               @keydown.esc.stop.prevent="connectionCellEdit = null"/>
+                                        <span v-else>{{ formatConnectionNumber(row[field]) }}{{ field === 'angle' ? '°' : '' }}</span>
+                                    </td>
+                                </template>
+                                <template v-else>
+                                    <td>{{ row.type === 'Arc' ? formatConnectionNumber(row.radius) : formatWaypoint(row.point) }}</td>
+                                    <td></td>
+                                </template>
+                            </tr>
+                        </tbody>
+                        <tfoot v-if="connectionGeometry">
+                            <tr><th scope="row" colspan="2">总长</th><td colspan="2">{{ formatConnectionNumber(connectionGeometry.length) }} m</td></tr>
+                        </tfoot>
+                    </table>
+                    <p v-if="connectionCellError" class="connection-edit-error" role="status">{{ connectionCellError }}</p>
                 </div>
 
                 <!-- AGV 路径：连接关系和圆角设置 -->
@@ -174,12 +215,38 @@
                         />
                         <span class="property-unit">m</span>
                     </div>
+                    <div v-if="componentPorts.length" class="component-ports">
+                        <div class="section-title">上下料点</div>
+                        <div v-for="port in componentPorts" :key="`${selectedItem.id}-${port.key}`" class="prop-row port-row">
+                            <span class="prop-key">{{ port.label }}</span>
+                            <label v-for="axis in ['x', 'y']" :key="axis" class="port-coordinate">
+                                <span>{{ axis.toUpperCase() }}</span>
+                                <input class="property-input" type="number" step="any"
+                                       :value="port.offset[axis]" :min="-portLimits[axis]" :max="portLimits[axis]"
+                                       :aria-label="`${port.label} ${axis.toUpperCase()} 坐标（米）`"
+                                       :title="`相对组件中心，范围 ${-portLimits[axis]} 至 ${portLimits[axis]} 米`"
+                                       @blur="handlePortCoordinateChange(port.key, axis, $event)"
+                                       @keydown.enter.prevent="$event.target.blur()"/>
+                            </label>
+                        </div>
+                        <p v-if="portError" class="port-error" role="status">{{ portError }}</p>
+                    </div>
+
                 </div>
                 <!-- 矩形控件独特功能 -->
                 <div class="prop-section" >
                     <!--  输入控件  -->
                     <div v-if="selectedItem.type === 'systemInput'" class="input-settings" :key="selectedItem.id">
                         <div class="section-title" >工件属性</div>
+                        <div class="prop-row input-property-row">
+                            <label class="prop-key" for="input-type">输入类型</label>
+                            <div class="input-type-control">
+                                <select id="input-type" class="property-input" :value="inputProperties.inputType"
+                                        @change="handleInputPropertyChange('inputType', $event)">
+                                    <option v-for="type in INPUT_ENTITY_TYPES" :key="type" :value="type">{{ type }}</option>
+                                </select>
+                            </div>
+                        </div>
                         <div class="prop-row input-property-row input-rule-row">
                             <label class="prop-key" for="input-rules">输入规则</label>
                             <select id="input-rules" name="inputRules" class="property-input">
@@ -248,7 +315,147 @@
                     <!-- 设备 -->
                     <div v-if="selectedItem.type === 'workstation'" class="input-settings" :key="selectedItem.id" >
                         <div class="section-title" >设备属性</div>
-<!--                    好，我们继续开发，看到PropertyPanel.vue249到252行，我给设备组件的属性面板添加了一栏设备属性，-->
+                        <div v-for="property in workstationTimeProperties" :key="property.field" class="prop-row input-property-row">
+                            <label class="prop-key" :for="`workstation-${property.field}`">{{ property.label }}</label>
+                            <input :id="`workstation-${property.field}`" class="property-input" type="text"
+                                   placeholder="dd:hh:mm:ss.ms" title="定值，格式：dd:hh:mm:ss.ms（可省略前面的时间段）"
+                                   :value="formatGenerationInterval(workstationProperties[property.field])"
+                                   @change="handleWorkstationTimeChange(property.field, $event)"
+                                   @blur="handleWorkstationTimeChange(property.field, $event)"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                        </div>
+                    </div>
+                    <!-- 加工站 -->
+                    <div v-if="selectedItem.type === 'parallelWorkstation'" class="input-settings" :key="selectedItem.id">
+                        <div class="section-title">加工站属性</div>
+                        <div class="prop-row input-property-row">
+                            <label class="prop-key" for="parallel-equipment-count">设备数量</label>
+                            <input id="parallel-equipment-count" class="property-input" type="number" min="1" step="1"
+                                   :value="parallelWorkstationProperties.equipmentCount"
+                                   @change="handleEquipmentCountChange" @blur="handleEquipmentCountChange"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                            <span class="property-unit">个</span>
+                        </div>
+                        <div v-for="property in workstationTimeProperties" :key="property.field" class="prop-row input-property-row">
+                            <label class="prop-key" :for="`parallel-${property.field}`">{{ property.label }}</label>
+                            <input :id="`parallel-${property.field}`" class="property-input" type="text"
+                                   placeholder="dd:hh:mm:ss.ms" title="定值，格式：dd:hh:mm:ss.ms（可省略前面的时间段）"
+                                   :value="formatGenerationInterval(parallelWorkstationProperties[property.field])"
+                                   @change="handleWorkstationTimeChange(property.field, $event)"
+                                   @blur="handleWorkstationTimeChange(property.field, $event)"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                        </div>
+                    </div>
+                    <!-- 装配站 -->
+                    <div v-if="selectedItem.type === 'assemblyWorkstation'" class="input-settings" :key="selectedItem.id">
+                        <div class="section-title">装配站属性</div>
+                        <div class="prop-row input-property-row">
+                            <label class="prop-key" for="assembly-unit-count">单元数量</label>
+                            <input id="assembly-unit-count" class="property-input" type="number" min="1" step="1"
+                                   :value="assemblyUnitCount" title="同时可用于装配的单元数量"
+                                   @change="handleAssemblyUnitCountChange" @blur="handleAssemblyUnitCountChange"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                            <span class="property-unit">个</span>
+                        </div>
+                        <div class="prop-row assembly-mode-row">
+                            <span id="assembly-mode-label" class="prop-key">装配模式</span>
+                            <div class="workpiece-display-options" role="radiogroup" aria-labelledby="assembly-mode-label">
+                                <label v-for="mode in ASSEMBLY_MODES" :key="mode.value" class="square-radio-label">
+                                    <input type="radio" class="square-radio" name="assembly-mode"
+                                           :checked="assemblyMode === mode.value"
+                                           @click="selectAssemblyMode(mode.value)"/>
+                                    {{ mode.label }}
+                                </label>
+                            </div>
+                        </div>
+                        <div class="assembly-table-container">
+                            <table class="assembly-table" aria-label="装配件/容器清单" @keydown.esc.stop="selectAssemblyRow(null)">
+                                <thead><tr><th scope="col">序号</th><th scope="col">装配件/容器类型</th><th scope="col">打包类型</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="(recipe, index) in assemblyRecipes" :key="index"
+                                        :class="{selected: selectedAssemblyRow === index}"
+                                        :aria-selected="selectedAssemblyRow === index" tabindex="0"
+                                        @click="selectAssemblyRow(index)"
+                                        @keydown.enter.prevent="selectAssemblyRow(index)" @keydown.space.prevent="selectAssemblyRow(index)">
+                                        <th scope="row">{{ index + 1 }}</th>
+                                        <td :title="recipe.productType">{{ recipe.productType }}</td>
+                                        <td :title="getAssemblyPackingType(recipe, assemblyMode)">{{ getAssemblyPackingType(recipe, assemblyMode) }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="assembly-actions">
+                            <button type="button" @click="openAssemblyRecipe(null)">增加行</button>
+                            <button type="button" :disabled="selectedAssemblyRow === null" @click="deleteAssemblyRecipe">删除行</button>
+                            <button type="button" :disabled="selectedAssemblyRow === null" @click="openAssemblyRecipe(selectedAssemblyRow)">编辑行</button>
+                        </div>
+                    </div>
+                    <!-- 拆卸站 -->
+                    <div v-if="selectedItem.type === 'disassemblyWorkstation'" class="input-settings" :key="selectedItem.id">
+                        <div class="section-title">拆卸站属性</div>
+                        <div class="prop-row input-property-row">
+                            <label class="prop-key" for="disassembly-unit-count">单元数量</label>
+                            <input id="disassembly-unit-count" class="property-input" type="number" min="1" step="1"
+                                   :value="disassemblyUnitCount" title="同时可用于拆卸的单元数量"
+                                   @change="handleDisassemblyUnitCountChange" @blur="handleDisassemblyUnitCountChange"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                            <span class="property-unit">个</span>
+                        </div>
+                        <div class="prop-row assembly-mode-row">
+                            <span id="disassembly-mode-label" class="prop-key">拆卸模式</span>
+                            <div class="workpiece-display-options" role="radiogroup" aria-labelledby="disassembly-mode-label">
+                                <label v-for="mode in DISASSEMBLY_MODES" :key="mode.value" class="square-radio-label">
+                                    <input type="radio" class="square-radio" name="disassembly-mode"
+                                           :checked="disassemblyMode === mode.value"
+                                           @change="emit('update-component-properties', {id: selectedItem.id, disassemblyMode: mode.value})"/>
+                                    {{ mode.label }}
+                                </label>
+                            </div>
+                        </div>
+                        <p v-if="disassemblyMode === 'container'" class="disassembly-hint">容器到站即卸载，无需配置 BOM。</p>
+                        <div class="assembly-table-container">
+                            <table class="assembly-table" aria-label="拆卸站装配件/容器清单" @keydown.esc.stop="selectDisassemblyRow(null)">
+                                <thead><tr><th scope="col">序号</th><th scope="col">装配件/容器类型</th><th scope="col">名称</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="(recipe, index) in disassemblyRecipes" :key="index"
+                                        :class="{selected: selectedDisassemblyRow === index}"
+                                        :aria-selected="selectedDisassemblyRow === index" tabindex="0"
+                                        @click="selectDisassemblyRow(index)"
+                                        @keydown.enter.prevent="selectDisassemblyRow(index)" @keydown.space.prevent="selectDisassemblyRow(index)">
+                                        <th scope="row">{{ index + 1 }}</th>
+                                        <td :title="recipe.productType">{{ recipe.productType }}</td>
+                                        <td :title="recipe.name">{{ recipe.name }}</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="assembly-actions">
+                            <button type="button" @click="openDisassemblyRecipe(null)">增加行</button>
+                            <button type="button" :disabled="selectedDisassemblyRow === null" @click="deleteDisassemblyRecipe">删除行</button>
+                            <button type="button" :disabled="selectedDisassemblyRow === null" @click="openDisassemblyRecipe(selectedDisassemblyRow)">编辑行</button>
+                        </div>
+                    </div>
+                    <!-- 缓冲区 -->
+                    <div v-if="selectedItem.type === 'buffer'" class="input-settings" :key="selectedItem.id">
+                        <div class="section-title">缓冲区属性</div>
+                        <div class="prop-row input-property-row buffer-property-row">
+                            <label class="prop-key" for="buffer-capacity">缓冲区最大容量</label>
+                            <input id="buffer-capacity" class="property-input" type="number" min="-1" step="1"
+                                   :value="bufferCapacity" title="-1 表示无限容量；其余请输入正整数。在途工件也占用容量。"
+                                   @change="handleBufferPropertyChange('bufferCapacity', $event)"
+                                   @blur="handleBufferPropertyChange('bufferCapacity', $event)"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                            <span class="property-unit">个</span>
+                        </div>
+                        <div class="prop-row input-property-row buffer-property-row">
+                            <label class="prop-key" for="buffer-minimum-stay">最短停留时间</label>
+                            <input id="buffer-minimum-stay" class="property-input" type="text"
+                                   :value="formatGenerationInterval(minimumStayTime)"
+                                   title="定值，格式：dd:hh:mm:ss.ms，到站后开始计时"
+                                   @change="handleBufferPropertyChange('minimumStayTime', $event)"
+                                   @blur="handleBufferPropertyChange('minimumStayTime', $event)"
+                                   @keydown.enter.prevent="$event.target.blur()"/>
+                        </div>
                     </div>
                 </div>
 
@@ -258,13 +465,20 @@
 </template>
 
 <script setup>
-import {computed} from "vue";
+import {computed, ref, watch} from "vue";
 import {getComponentLabel} from "../utils/componentLabel.js";
-import {STATION_TYPES, getStationType, getComponentBounds, getComponentCenter} from "../utils/stations.js";
+import {STATION_TYPES, getStationType, getComponentFootprint, getComponentCenter, getComponentQuarterTurns} from "../utils/stations.js";
+import clockwiseIcon from "../assets/icons/clockwise.svg";
+import anticlockwiseIcon from "../assets/icons/anticlockwise.svg";
 import {getPathWidth} from "../utils/agvPath.js";
 import {RESIZABLE_COMPONENT_TYPES, getDefaultShadowColor} from "../utils/componentAppearance.js";
-import {INPUT_PROPERTY_DEFAULTS, isValidInputProperty, parseGenerationInterval, formatGenerationInterval} from "../utils/inputRules.js";
+import {INPUT_ENTITY_TYPES, INPUT_PROPERTY_DEFAULTS, getInputType, isValidInputProperty, parseGenerationInterval, formatGenerationInterval} from "../utils/inputRules.js";
+import {WORKSTATION_PROPERTY_DEFAULTS, PARALLEL_WORKSTATION_PROPERTY_DEFAULTS, isValidWorkstationProperty, isValidParallelWorkstationProperty} from "../utils/workstationProperties.js";
 import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry} from "../utils/connectionLine.js";
+import {ASSEMBLY_MODES, getAssemblyPackingType, getAssemblyUnitCount, isValidAssemblyUnitCount} from "../utils/assemblyRecipes.js";
+import {DISASSEMBLY_MODES, getDisassemblyUnitCount, isValidDisassemblyUnitCount} from "../utils/disassemblyRecipes.js";
+import {getBufferProperty, isValidBufferProperty} from "../utils/bufferProperties.js";
+import {getComponentPorts, getComponentPortOffset, isValidComponentPortOffset} from "../utils/componentPorts.js";
 // 声明接受父组件传来的两个对象
 const props = defineProps({
     // 当前选中的控件对象（由父组件根据 selectedId 查出后传入）
@@ -279,33 +493,233 @@ const props = defineProps({
     },
 });
 const emit = defineEmits(["update-component-properties", "update-component-position", "open-dialog"]);
+const bufferCapacity = computed(() => getBufferProperty(props.selectedItem, 'bufferCapacity'));
+const minimumStayTime = computed(() => getBufferProperty(props.selectedItem, 'minimumStayTime'));
+const componentPorts = computed(() => getComponentPorts(props.selectedItem).map(port => ({
+    ...port, offset: getComponentPortOffset(props.selectedItem, port.key),
+})));
+const portError = ref('');
+
+function handlePortCoordinateChange(key, axis, event) {
+    const port = componentPorts.value.find(entry => entry.key === key);
+    if (!port) return;
+    const raw = event.target.value.trim();
+    const point = {...port.offset, [axis]: raw === '' ? NaN : Number(raw)};
+    if (!isValidComponentPortOffset(props.selectedItem, point)) {
+        event.target.value = String(port.offset[axis]);
+        portError.value = `${port.label} ${axis.toUpperCase()} 坐标应在 ${-portLimits.value[axis]} 至 ${portLimits.value[axis]} 米之间。`;
+        return;
+    }
+    portError.value = '';
+    event.target.value = String(point[axis]);
+    if (point[axis] !== port.offset[axis]) {
+        emit('update-component-properties', {id: props.selectedItem.id, portOffset: {key, point}});
+    }
+}
+
+function handleBufferPropertyChange(field, event) {
+    const item = props.selectedItem;
+    if (item?.type !== 'buffer') return;
+    const duration = field === 'minimumStayTime';
+    const raw = event.target.value;
+    const value = duration ? parseGenerationInterval(raw, {allowZero: true}) : Number(raw);
+    const current = getBufferProperty(item, field);
+    const valid = isValidBufferProperty(field, value);
+    const displayValue = valid ? value : current;
+    event.target.value = duration ? formatGenerationInterval(displayValue) : String(displayValue);
+    if (valid && value !== current) emit('update-component-properties', {id: item.id, [field]: value});
+}
+const assemblyMode = computed(() => props.selectedItem?.assemblyMode ?? 'parts');
+const assemblyUnitCount = computed(() => getAssemblyUnitCount(props.selectedItem));
+const assemblyRecipes = computed(() => props.selectedItem?.assemblyRecipes ?? []);
+const selectedAssemblyRow = ref(null);
+const assemblyModeForEdit = ref(null);
+const disassemblyMode = computed(() => props.selectedItem?.disassemblyMode ?? 'parts');
+const disassemblyUnitCount = computed(() => getDisassemblyUnitCount(props.selectedItem));
+const disassemblyRecipes = computed(() => props.selectedItem?.disassemblyRecipes ?? []);
+const selectedDisassemblyRow = ref(null);
+watch(() => props.selectedItem?.id, () => {
+    selectAssemblyRow(null);
+    selectDisassemblyRow(null);
+    portError.value = '';
+});
+
+function handleDisassemblyUnitCountChange(event) {
+    const item = props.selectedItem;
+    if (item?.type !== 'disassemblyWorkstation') return;
+    const count = Number(event.target.value);
+    const current = disassemblyUnitCount.value;
+    event.target.value = String(isValidDisassemblyUnitCount(count) ? count : current);
+    if (isValidDisassemblyUnitCount(count) && count !== current) {
+        emit('update-component-properties', {id: item.id, disassemblyUnitCount: count});
+    }
+}
+
+function selectDisassemblyRow(index) {
+    selectedDisassemblyRow.value = selectedDisassemblyRow.value === index ? null : index;
+}
+
+function openDisassemblyRecipe(rowIndex) {
+    if (rowIndex !== null && !disassemblyRecipes.value[rowIndex]) return;
+    emit('open-dialog', {itemId: props.selectedItem.id, dialogType: 'disassembly-recipe', rowIndex});
+}
+
+function deleteDisassemblyRecipe() {
+    if (!disassemblyRecipes.value[selectedDisassemblyRow.value]) return;
+    emit('update-component-properties', {
+        id: props.selectedItem.id,
+        disassemblyRecipes: disassemblyRecipes.value.filter((_, index) => index !== selectedDisassemblyRow.value),
+    });
+    selectDisassemblyRow(null);
+}
+
+function handleAssemblyUnitCountChange(event) {
+    const item = props.selectedItem;
+    if (item?.type !== 'assemblyWorkstation') return;
+    const count = Number(event.target.value);
+    const current = assemblyUnitCount.value;
+    if (!isValidAssemblyUnitCount(count)) {
+        event.target.value = String(current);
+        return;
+    }
+    event.target.value = String(count);
+    if (count !== current) emit('update-component-properties', {id: item.id, assemblyUnitCount: count});
+}
+
+function selectAssemblyRow(index) {
+    selectedAssemblyRow.value = selectedAssemblyRow.value === index ? null : index;
+    assemblyModeForEdit.value = null;
+}
+
+function selectAssemblyMode(mode) {
+    emit('update-component-properties', {id: props.selectedItem.id, assemblyMode: mode});
+    const recipe = assemblyRecipes.value[selectedAssemblyRow.value];
+    assemblyModeForEdit.value = recipe ? {recipe, mode} : null;
+}
+
+function openAssemblyRecipe(rowIndex) {
+    const recipe = assemblyRecipes.value[rowIndex];
+    if (rowIndex !== null && !recipe) return;
+    const pending = assemblyModeForEdit.value;
+    emit('open-dialog', {
+        itemId: props.selectedItem.id, dialogType: 'assembly-recipe', rowIndex,
+        editMode: pending && pending.recipe === recipe ? pending.mode : undefined,
+    });
+}
+
+function deleteAssemblyRecipe() {
+    if (!assemblyRecipes.value[selectedAssemblyRow.value]) return;
+    emit('update-component-properties', {
+        id: props.selectedItem.id,
+        assemblyRecipes: assemblyRecipes.value.filter((_, index) => index !== selectedAssemblyRow.value),
+    });
+    selectAssemblyRow(null);
+}
 const connectionGeometry = computed(() => getConnectionGeometry(props.selectedItem, props.placedComponents));
-const connectionLength = computed(() => connectionGeometry.value ? Number(connectionGeometry.value.length.toFixed(2)) : '');
-const connectionAngle = computed(() => connectionGeometry.value ? Number(connectionGeometry.value.angle.toFixed(2)) : '');
 const connectionWorkpieceSpeed = computed(() => props.selectedItem?.workpieceSpeed ?? DEFAULT_WORKPIECE_SPEED);
 const connectionEndpointOptions = [{value: 'to', label: '终点'}, {value: 'from', label: '起点'}];
 const connectionAffectedEndpoint = computed(() => props.selectedItem?.affectedEndpoint === 'from' ? 'from' : 'to');
+const formatConnectionNumber = value => Number(value.toFixed(4));
+const formatWaypoint = point => '(' + formatConnectionNumber(point.x) + ', ' + formatConnectionNumber(point.y) + ')';
+const readConnectionNumber = value => String(value).trim() === '' ? NaN : Number(value);
+
 const handleConnectionPropertyChange = (field, event) => {
-    const item = props.selectedItem;
-    if (item?.type !== 'connectionLine') return;
-    const current = {length: connectionLength.value, angle: connectionAngle.value, workpieceSpeed: connectionWorkpieceSpeed.value};
-    const raw = event.target.value.trim();
-    const value = raw === '' ? NaN : Number(raw);
-    const valid = Number.isFinite(value) && (field === 'angle' ? value >= -360 && value <= 360 : value >= 0);
-    if (!valid || (field !== 'workpieceSpeed' && !connectionGeometry.value)) {
-        event.target.value = String(current[field]);
+    if (props.selectedItem?.type !== 'connectionLine') return;
+    const value = readConnectionNumber(event.target.value);
+    if (!Number.isFinite(value) || value < 0) {
+        event.target.value = String(connectionWorkpieceSpeed.value);
         return;
     }
-    if (value !== current[field]) emit('update-component-properties', {id: item.id, [field]: value});
+    if (value !== connectionWorkpieceSpeed.value) emit('update-component-properties', {id: props.selectedItem.id, [field]: value});
 };
+
+const connectionCellEdit = ref(null);
+const connectionCellError = ref('');
+const isEditingConnectionCell = (row, field) => connectionCellEdit.value?.index === row.index && connectionCellEdit.value?.field === field;
+
+function startConnectionCellEdit(row, field) {
+    if (isEditingConnectionCell(row, field)) return;
+    connectionCellError.value = '';
+    connectionCellEdit.value = {id: props.selectedItem.id, index: row.index, field,
+        value: String(formatConnectionNumber(row[field])), initial: row[field]};
+}
+
+const focusConnectionCell = ({el}) => {
+    el.focus();
+    el.select();
+};
+
+function saveConnectionCellEdit() {
+    const draft = connectionCellEdit.value;
+    if (!draft) return;
+    connectionCellEdit.value = null;
+    if (draft.id !== props.selectedItem?.id) return;
+    const value = readConnectionNumber(draft.value);
+    if (!Number.isFinite(value) || (draft.field === 'angle' ? Math.abs(value) > 360 : value < 0)) {
+        connectionCellError.value = draft.field === 'angle' ? '请输入 -360° 至 360° 的角度。' : '请输入大于或等于 0 的长度。';
+        return;
+    }
+    if (value === formatConnectionNumber(draft.initial)) return;
+    const {index, field} = draft;
+    emit('update-component-properties', {id: props.selectedItem.id, connectionSegment: {index, [field]: value}});
+}
+
+function openConnectionRadius(row) {
+    emit('open-dialog', {itemId: props.selectedItem.id, dialogType: 'connection-radius', rowIndex: row.index});
+}
+
+watch(() => props.selectedItem?.id, () => {
+    connectionCellEdit.value = null;
+    connectionCellError.value = '';
+});
+
 const workpieceDisplayOptions = [
     {value: 'recommended', label: '按推荐大小'},
     {value: 'actual', label: '按实际大小'},
 ];
 const inputProperties = computed(() => Object.fromEntries(
     Object.entries(INPUT_PROPERTY_DEFAULTS).map(([field, defaultValue]) =>
+        [field, field === 'inputType' ? getInputType(props.selectedItem) : props.selectedItem?.[field] ?? defaultValue]),
+));
+const workstationTimeProperties = [
+    {field: 'processingTime', label: '加工时长'},
+    {field: 'setupTime', label: '准备时长'},
+];
+const workstationProperties = computed(() => Object.fromEntries(
+    Object.entries(WORKSTATION_PROPERTY_DEFAULTS).map(([field, defaultValue]) =>
         [field, props.selectedItem?.[field] ?? defaultValue]),
 ));
+const parallelWorkstationProperties = computed(() => Object.fromEntries(
+    Object.entries(PARALLEL_WORKSTATION_PROPERTY_DEFAULTS).map(([field, defaultValue]) =>
+        [field, props.selectedItem?.[field] ?? defaultValue]),
+));
+const handleEquipmentCountChange = (event) => {
+    const item = props.selectedItem;
+    if (item?.type !== 'parallelWorkstation') return;
+    const raw = event.target.value.trim();
+    const count = raw === '' ? NaN : Number(raw);
+    if (!isValidParallelWorkstationProperty('equipmentCount', count)) {
+        event.target.value = String(parallelWorkstationProperties.value.equipmentCount);
+        return;
+    }
+    event.target.value = String(count);
+    if (count !== parallelWorkstationProperties.value.equipmentCount) {
+        emit('update-component-properties', {id: item.id, equipmentCount: count});
+    }
+};
+const handleWorkstationTimeChange = (field, event) => {
+    const item = props.selectedItem;
+    if (item?.type !== 'workstation' && item?.type !== 'parallelWorkstation') return;
+    const seconds = parseGenerationInterval(event.target.value, {allowZero: true});
+    if (!isValidWorkstationProperty(field, seconds)) {
+        event.target.value = formatGenerationInterval(workstationProperties.value[field]);
+        return;
+    }
+    event.target.value = formatGenerationInterval(seconds);
+    if (seconds !== workstationProperties.value[field]) {
+        emit('update-component-properties', {id: item.id, [field]: seconds});
+    }
+};
 const handleGenerationIntervalChange = (event) => {
     const item = props.selectedItem;
     if (item?.type !== 'systemInput') return;
@@ -323,7 +737,9 @@ const handleInputPropertyChange = (field, event) => {
     const item = props.selectedItem;
     if (item?.type !== 'systemInput') return;
     const raw = event.target.value.trim();
-    const value = field === 'inputCloseEnabled' ? event.target.checked : (raw === '' ? NaN : Number(raw));
+    let value = raw === '' ? NaN : Number(raw);
+    if (field === 'inputCloseEnabled') value = event.target.checked;
+    if (field === 'inputType') value = raw;
     if (!isValidInputProperty(field, value)) {
         event.target.value = String(inputProperties.value[field]);
         return;
@@ -394,15 +810,29 @@ const handleCenterCoordinateChange = (axis, event) => {
 const isResizableComponent = computed(() =>
     Boolean(props.selectedItem && RESIZABLE_COMPONENT_TYPES.has(props.selectedItem.type)),
 );
+function rotateSelectedComponent(rotationDelta) {
+    if (isResizableComponent.value) {
+        emit("update-component-properties", {id: props.selectedItem.id, rotationDelta});
+    }
+}
+
+const footprint = computed(() => props.selectedItem ? getComponentFootprint(props.selectedItem) : null);
+const portLimits = computed(() => ({x: (footprint.value?.width ?? 0) / 2, y: (footprint.value?.height ?? 0) / 2}));
+watch([() => footprint.value?.width, () => footprint.value?.height], () => { portError.value = ''; });
 // 尺寸已直接以米存储，这里只做 2 位小数显示（与输入框 step 0.01 一致）
-const widthInMeters = computed(() => props.selectedItem ? Number(getComponentBounds(props.selectedItem).width.toFixed(2)) : 0);
-const heightInMeters = computed(() => props.selectedItem ? Number(getComponentBounds(props.selectedItem).height.toFixed(2)) : 0);
+const widthInMeters = computed(() => Number(footprint.value?.width.toFixed(2) ?? 0));
+const heightInMeters = computed(() => Number(footprint.value?.height.toFixed(2) ?? 0));
+
+function modelDimension(dimension) {
+    if (getComponentQuarterTurns(props.selectedItem) % 2 === 0) return dimension;
+    return dimension === 'width' ? 'height' : 'width';
+}
 
 const handleDimensionChange = (dimension, event) => {
     const inputValue = Number(event.target.value);
     // 允许用户输入过程中的任意值（米），不做限制
     if (!isNaN(inputValue) && inputValue > 0) {
-        emit("update-component-properties", {id: props.selectedItem.id, [dimension]: inputValue});
+        emit("update-component-properties", {id: props.selectedItem.id, [modelDimension(dimension)]: inputValue});
     }
 };
 
@@ -411,7 +841,7 @@ const handleDimensionBlur = (dimension, event) => {
     // 失焦时应用最小值限制（0.01 米）
     const meters = Math.max(0.01, inputValue || 0.01);
     if (meters !== inputValue) {
-        emit("update-component-properties", {id: props.selectedItem.id, [dimension]: meters});
+        emit("update-component-properties", {id: props.selectedItem.id, [modelDimension(dimension)]: meters});
     }
 };
 
@@ -426,16 +856,64 @@ const handleShadowColorChange = (event) => {
 .prop-row.input-property-row { display: grid; }
 .input-property-row { grid-template-columns: 84px minmax(0, 1fr) 14px; gap: 6px; }
 .input-rule-row { grid-template-columns: 84px minmax(0, 1fr) 28px; }
+.buffer-property-row { grid-template-columns: 96px minmax(0, 1fr) 14px; }
 .input-close-row { grid-template-columns: 84px minmax(0, 1fr) 14px auto; }
 .input-property-row .property-input { box-sizing: border-box; width: 100%; min-width: 0; height: 28px; background: white; }
 .input-property-row .property-input:focus { outline: 2px solid #93c5fd; outline-offset: 1px; }
 .input-property-row .property-input:disabled { background: #f3f4f6; color: #9ca3af; cursor: not-allowed; }
+.input-type-control { position: relative; min-width: 0; }
+.input-type-control .property-input {
+    appearance: none;
+    padding: 3px 28px 3px 8px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+.input-type-control .property-input:hover { border-color: #94a3b8; }
+.input-type-control::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: 11px;
+    width: 6px;
+    height: 6px;
+    border: solid #475569;
+    border-width: 0 1.5px 1.5px 0;
+    transform: translateY(-70%) rotate(45deg);
+    pointer-events: none;
+}
 .input-rule-row .btn { justify-content: center; margin: 0; padding: 4px; }
 .input-rule-row .btn-img { margin: 0; }
 .input-close-toggle { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; color: #6b7280; cursor: pointer; }
 .input-close-toggle input { margin: 0; accent-color: #0780ff; }
 .workpiece-display-row { grid-template-columns: 84px minmax(0, 1fr); align-items: start; }
 .workpiece-display-options { display: flex; flex-direction: column; gap: 8px; }
+.assembly-mode-row { align-items: flex-start; }
+.disassembly-hint { margin: 0; font-size: 12px; color: #6b7280; }
+.assembly-table-container { max-height: 180px; overflow: auto; border: 1px solid #d1d5db; border-radius: 4px; }
+.assembly-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.assembly-table th, .assembly-table td { padding: 6px 3px; text-align: center; font-weight: normal; }
+.assembly-table thead { position: sticky; top: 0; background: #f3f4f6; }
+.assembly-table th:first-child { width: 36px; }
+.assembly-table th:last-child { width: 76px; }
+.assembly-table td { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.assembly-table tbody tr { cursor: pointer; border-top: 1px solid #e5e7eb; }
+.assembly-table tr.selected { background: #dbeafe; color: #1e40af; }
+.assembly-table tr:focus-visible { outline: 1px solid #2563eb; outline-offset: -1px; }
+.assembly-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.assembly-actions button { flex: 1 0 auto; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 4px; background: white; font: inherit; font-size: 12px; cursor: pointer; }
+.assembly-actions button:disabled { opacity: .5; cursor: default; }
+.connection-table-title { margin-top: 8px; }
+.connection-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; color: #1f2937; }
+.connection-table th, .connection-table td { padding: 6px 4px; text-align: center; border: 1px solid #dbe2eb; overflow-wrap: anywhere; }
+.connection-table th, .connection-table tfoot td { background: #f3f6fa; font-weight: 600; }
+.connection-table th:nth-child(1) { width: 34px; }
+.connection-table th:nth-child(2) { width: 42px; }
+.connection-table th:nth-child(4) { width: 56px; }
+.connection-table td[tabindex], .connection-corner-row { cursor: pointer; }
+.connection-table td[tabindex]:hover, .connection-corner-row:hover { background: #eaf2ff; }
+.connection-table .connection-cell-input { box-sizing: border-box; width: 100%; padding: 3px; }
+.connection-edit-error { margin: 0; color: #b91c1c; font-size: 12px; }
+
 .connection-endpoint-options { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .square-radio-label { display: inline-flex; align-items: center; gap: 6px; color: #374151; cursor: pointer; }
 .square-radio {
@@ -585,6 +1063,26 @@ const handleShadowColorChange = (event) => {
 .dimension-row {
     align-items: center;
 }
+.component-ports { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.prop-row.port-row { display: grid; grid-template-columns: 60px minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+.port-coordinate { display: flex; align-items: center; gap: 4px; color: #6b7280; min-width: 0; }
+.port-coordinate .property-input { box-sizing: border-box; width: 100%; min-width: 0; }
+.port-error { margin: 0; color: #b91c1c; font-size: 12px; }
+
+.rotation-buttons { display: flex; gap: 6px; }
+.rotation-buttons button {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    background: #fff;
+    cursor: pointer;
+}
+.rotation-buttons button:hover { background: #eff6ff; }
+.rotation-buttons img { width: 16px; height: 16px; }
 
 .property-input {
     width: 72px;

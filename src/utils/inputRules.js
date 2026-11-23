@@ -1,7 +1,19 @@
 export const PART_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7'];
+export const INPUT_ENTITY_TYPES = ['Workpiece', 'Pallet', 'Vehicle'];
+export const DEFAULT_INPUT_ENTITY_TYPE = INPUT_ENTITY_TYPES[0];
+
+export function getInputType(input) {
+    return INPUT_ENTITY_TYPES.includes(input?.inputType) ? input.inputType : DEFAULT_INPUT_ENTITY_TYPE;
+}
+
+export function getInputRuleCategory(rule) {
+    // 旧规则只有实体类型时，将已有值保留为类别，供 BOM 匹配。
+    return rule.partType ?? (INPUT_ENTITY_TYPES.includes(rule.entityType) ? rule.entityType : undefined);
+}
 
 // 时间统一使用仿真开始后的秒数。
 export const INPUT_PROPERTY_DEFAULTS = {
+    inputType: DEFAULT_INPUT_ENTITY_TYPE,
     generationInterval: 60,
     firstGenerationTime: 0,
     maxOutputCount: 100,
@@ -18,6 +30,7 @@ export function getDefaultWorkpieceDimensions(input) {
 }
 
 export function isValidInputProperty(field, value) {
+    if (field === 'inputType') return INPUT_ENTITY_TYPES.includes(value);
     if (field === 'workpieceDisplayMode') return value === 'recommended' || value === 'actual';
     if (field === 'generationInterval') return Number.isFinite(value) && value > 0 && Number.isSafeInteger(Math.round(value * 1000));
     if (field === 'inputCloseEnabled') return typeof value === 'boolean';
@@ -26,7 +39,8 @@ export function isValidInputProperty(field, value) {
 }
 
 // 支持 秒、分:秒、时:分:秒、天:时:分:秒，末段最多三位毫秒小数。
-export function parseGenerationInterval(text) {
+// 设备时长允许为 0；工件产生间隔仍必须大于 0。
+export function parseGenerationInterval(text, {allowZero = false} = {}) {
     const parts = text.trim().split(':');
     if (parts.length > 4 || !parts.every((part, index) =>
         (index === parts.length - 1 ? /^\d+(?:\.\d{1,3})?$/ : /^\d+$/).test(part))) return NaN;
@@ -37,7 +51,7 @@ export function parseGenerationInterval(text) {
     if (last === 3 && values[1] >= 24) return NaN;
     const units = [1000, 60000, 3600000, 86400000];
     const milliseconds = values.reduce((total, value, index) => total + Math.round(value * units[last - index]), 0);
-    return Number.isSafeInteger(milliseconds) && milliseconds > 0 ? milliseconds / 1000 : NaN;
+    return Number.isSafeInteger(milliseconds) && (allowZero ? milliseconds >= 0 : milliseconds > 0) ? milliseconds / 1000 : NaN;
 }
 
 export function formatGenerationInterval(seconds) {
@@ -55,8 +69,9 @@ export function formatGenerationInterval(seconds) {
 
 export function getInputRuleValidationMessage(rows) {
     for (const [index, row] of rows.entries()) {
-        if (typeof row.partType !== 'string' || !row.partType.trim()) {
-            return `第 ${index + 1} 行的 Part 类型不能为空。`;
+        const category = getInputRuleCategory(row);
+        if (typeof category !== 'string' || !category.trim()) {
+            return `请填写第 ${index + 1} 行的类别。`;
         }
         for (const field of ['length', 'width']) {
             // 旧规则缺少尺寸时由输入组件的默认尺寸补齐。

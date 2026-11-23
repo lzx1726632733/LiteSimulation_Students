@@ -12,6 +12,7 @@ export const topBarMenus = [
       { id: 'save',        label: '保存' },
       { id: 'save-as',     label: '另存为' },
       { id: 'close-model', label: '关闭当前模型',   dividerBefore: true },
+      { id: 'shortcut-settings', label: '快捷键设置', dividerBefore: true },
     ],
   },
   {

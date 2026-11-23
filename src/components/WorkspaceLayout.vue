@@ -117,8 +117,14 @@
         </div>
     </div>
     <Dialog v-if="activeDialog && dialogItem"
-            :key="`${activeDialog.itemId}-${activeDialog.dialogType}`"
+            :key="activeDialog.key"
             :item="dialogItem" :dialog-type="activeDialog.dialogType"
+            :assembly-recipe="activeDialog.dialogType === 'assembly-recipe' ? activeDialog.recipe : null"
+            :assembly-mode="activeDialog.mode"
+            :assembly-packing-type="activeDialog.packingType"
+            :disassembly-recipe="activeDialog.dialogType === 'disassembly-recipe' ? activeDialog.recipe : null"
+            :disassembly-mode="activeDialog.mode"
+            :connection-corner="dialogConnectionCorner"
             @close="activeDialog = null" @save="saveDialog"/>
 </template>
 
@@ -130,14 +136,20 @@ import PropertyPanel from './PropertyPanel.vue'
 import Dialog from './Dialog.vue'
 import ConsolePanel from './ConsolePanel.vue'
 import {getComponentLabel} from '../utils/componentLabel.js'
-import {STATION_TYPES, getStationType, getNextStationIndex, getComponentCenter} from '../utils/stations.js'
+import {STATION_TYPES, getStationType, getNextStationIndex, getComponentCenter, getComponentQuarterTurns} from '../utils/stations.js'
+import {RESIZABLE_COMPONENT_TYPES} from '../utils/componentAppearance.js'
 import {getCornerMaxRadius} from '../utils/agvPath.js'
 import {menuControls} from "@/config/controlMenuData";
 import {simulationToolBarMenus} from '../config/simulationToolBarMenuData.js'
 import {createBootstrapTooltipDirective} from '../assets/bootstrap/tooltipController.js'
-import {INPUT_PROPERTY_DEFAULTS, isValidInputProperty, getDefaultWorkpieceDimensions} from '../utils/inputRules.js'
+import {INPUT_PROPERTY_DEFAULTS, getInputType, isValidInputProperty, getDefaultWorkpieceDimensions} from '../utils/inputRules.js'
+import {WORKSTATION_PROPERTY_DEFAULTS, PARALLEL_WORKSTATION_PROPERTY_DEFAULTS, isValidWorkstationProperty, isValidParallelWorkstationProperty, ensureParallelWorkstationEquipment} from '../utils/workstationProperties.js'
+import {ASSEMBLY_MODES, CONTAINER_TYPES, getAssemblyPackingType, getAssemblyRecipeError, getAssemblyUnitCount, isValidAssemblyUnitCount} from '../utils/assemblyRecipes.js'
+import {DISASSEMBLY_MODES, getDisassemblyRecipeError, getDisassemblyUnitCount, isValidDisassemblyUnitCount} from '../utils/disassemblyRecipes.js'
+import {BUFFER_PROPERTY_DEFAULTS, isValidBufferProperty} from '../utils/bufferProperties.js'
+import {fitComponentPorts, getLocalComponentPorts, setComponentPortOffset} from '../utils/componentPorts.js'
 import {createInputSimulation} from '../utils/inputSimulation.js'
-import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry} from '../utils/connectionLine.js'
+import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry, getConnectionSegmentMove} from '../utils/connectionLine.js'
 
 const vBootstrapTooltip = createBootstrapTooltipDirective()
 
@@ -175,7 +187,12 @@ function generateWorkpieces() {
 
 function resetWorkpieces() {
     inputSimulation.reset()
+    inputSimulation.syncAttachments(placedComponents.value)
     workpieces.value = []
+}
+
+function getEquipmentStates(stationId) {
+    return inputSimulation.getEquipmentStates(stationId)
 }
 
 function finishSimulationIfComplete() {
@@ -288,13 +305,68 @@ watch(placedComponents, () => {
 
 // 记录打开时的控件 ID 和弹窗用途，背景中的选择变化不会改变编辑目标。
 const activeDialog = ref(null)
+let nextDialogKey = 0
 const dialogItem = computed(() => placedComponents.value.find(item => item.id === activeDialog.value?.itemId))
-const openDialog = ({itemId, dialogType}) => {
-    activeDialog.value = {itemId, dialogType}
+const findConnectionCorner = (item, index) => Number.isInteger(index) && index >= 0
+    ? getConnectionGeometry(item, placedComponents.value)?.rows[index * 2 + 1]
+    : null
+const dialogConnectionCorner = computed(() => activeDialog.value?.dialogType === 'connection-radius'
+    ? findConnectionCorner(dialogItem.value, activeDialog.value.rowIndex)
+    : null)
+const openDialog = ({itemId, dialogType, rowIndex = null, editMode}) => {
+    const item = placedComponents.value.find(component => component.id === itemId)
+    if (!item) return
+    if (dialogType === 'connection-radius') {
+        if (!findConnectionCorner(item, rowIndex)) return
+        activeDialog.value = {itemId, dialogType, rowIndex, key: ++nextDialogKey}
+        return
+    }
+    const isDisassembly = dialogType === 'disassembly-recipe'
+    if (isDisassembly && item.type !== 'disassemblyWorkstation') return
+    const recipes = isDisassembly ? item.disassemblyRecipes : item.assemblyRecipes
+    const recipe = rowIndex === null ? null : recipes?.[rowIndex]
+    if (rowIndex !== null && !recipe) return
+    let mode = isDisassembly ? (item.disassemblyMode ?? 'parts') : (editMode ?? item.assemblyMode ?? 'parts')
+    let packingType
+    if (dialogType === 'assembly-recipe') {
+        if (mode === 'parts') {
+            packingType = 'Workpiece'
+        } else if (recipe && !editMode) {
+            packingType = getAssemblyPackingType(recipe, mode)
+            mode = CONTAINER_TYPES.includes(packingType) ? 'container' : 'parts'
+        } else {
+            packingType = CONTAINER_TYPES[0]
+        }
+    }
+    activeDialog.value = {itemId, dialogType, recipe, mode, packingType, key: ++nextDialogKey}
 }
-const saveDialog = ({itemId, dialogType, properties}) => {
+const saveDialog = ({itemId, dialogType, properties, assemblyRecipe, disassemblyRecipe, radius}) => {
     if (itemId !== activeDialog.value?.itemId || dialogType !== activeDialog.value?.dialogType) return
-    handleUpdateComponentProperties({id: itemId, ...properties})
+    if (dialogType === 'assembly-recipe' || dialogType === 'disassembly-recipe') {
+        const isDisassembly = dialogType === 'disassembly-recipe'
+        const item = dialogItem.value
+        const itemType = isDisassembly ? 'disassemblyWorkstation' : 'assemblyWorkstation'
+        const field = isDisassembly ? 'disassemblyRecipes' : 'assemblyRecipes'
+        const recipe = isDisassembly ? disassemblyRecipe : assemblyRecipe
+        if (item?.type !== itemType) return
+        const error = isDisassembly
+            ? getDisassemblyRecipeError(recipe, {allowEmpty: activeDialog.value.mode === 'container'})
+            : getAssemblyRecipeError(recipe)
+        if (error) return
+        const recipes = [...(item[field] ?? [])]
+        const original = activeDialog.value.recipe
+        const index = original ? recipes.indexOf(original) : recipes.length
+        if (index !== -1) {
+            recipes[index] = recipe
+            handleUpdateComponentProperties({id: itemId, [field]: recipes})
+        }
+    } else if (dialogType === 'connection-radius') {
+        const corner = dialogConnectionCorner.value
+        if (!corner || !Number.isFinite(radius) || radius < 0 || radius > corner.maxRadius) return
+        handleUpdateComponentProperties({id: itemId, connectionRadius: {index: corner.index, radius}})
+    } else {
+        handleUpdateComponentProperties({id: itemId, ...properties})
+    }
     activeDialog.value = null
 }
 
@@ -343,9 +415,33 @@ const handleComponentPlaced = (component) => {
             if (component[field] === undefined) component[field] = defaultValue
         }
     }
+    if (component.type === 'workstation') {
+        for (const [field, defaultValue] of Object.entries(WORKSTATION_PROPERTY_DEFAULTS)) {
+            if (component[field] === undefined) component[field] = defaultValue
+        }
+    }
+    if (component.type === 'parallelWorkstation') {
+        for (const [field, defaultValue] of Object.entries(PARALLEL_WORKSTATION_PROPERTY_DEFAULTS)) {
+            if (component[field] === undefined) component[field] = defaultValue
+        }
+        ensureParallelWorkstationEquipment(component)
+    }
+    if (component.type === 'assemblyWorkstation') {
+        component.assemblyUnitCount = getAssemblyUnitCount(component)
+        component.assemblyMode ??= 'parts'
+        component.assemblyRecipes ??= []
+    }
+    if (component.type === 'disassemblyWorkstation') {
+        component.disassemblyUnitCount = getDisassemblyUnitCount(component)
+        component.disassemblyMode ??= 'parts'
+        component.disassemblyRecipes ??= []
+    }
+    if (component.type === 'buffer') {
+        for (const [field, value] of Object.entries(BUFFER_PROPERTY_DEFAULTS)) component[field] ??= value
+    }
     if (component.type === 'systemInput' && component.inputRuleRows === undefined) {
         component.inputRuleRows = [{
-            partType: 'Part1',
+            partType: getInputType(component),
             name: '',
             ...getDefaultWorkpieceDimensions(component),
             fillColor: '#22c55e',
@@ -381,9 +477,20 @@ const handleTreeFocusComponent = (id) => {
 }
 
 // 画布拖拽控件后，更新单一数据源中的位置
-const handleUpdateComponentPosition = ({id, x, y, nodes}) => {
+const handleUpdateComponentPosition = ({id, x, y, nodes, connectionCorner}) => {
     const target = placedComponents.value.find((item) => item.id === id)
     if (!target) return
+    if (target.type === 'connectionLine') {
+        const index = connectionCorner?.index
+        const point = connectionCorner?.point
+        if (!Number.isInteger(index) || !target.waypoints?.[index] || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return
+        target.waypoints[index] = point
+        const radii = target.cornerRadii ?? []
+        target.cornerRadii = target.waypoints.map((_, i) => i === index ? 0 : radii[i] ?? 0)
+        const route = getConnectionGeometry(target, placedComponents.value)
+        if (route) target.cornerRadii = route.cornerRadii
+        return
+    }
     // 如果提供了 nodes 参数，说明是在拖动 AGV 路径的拐点
     if (nodes) {
         target.nodes = nodes
@@ -406,20 +513,36 @@ const handleUpdateComponentProperties = ({
                                              angle,
                                              workpieceSpeed,
                                              affectedEndpoint,
+                                             connectionSegment,
+                                             connectionRadius,
                                              width,
                                              height,
+                                             rotationDelta,
+                                             portOffset,
                                              shadowColor,
                                              stationType,
                                              pathWidth,
                                              cornerRadii,
                                              reverseDirection,
                                              inputRuleRows,
+                                             inputType,
                                              generationInterval,
                                              firstGenerationTime,
                                              maxOutputCount,
                                              inputCloseTime,
                                              inputCloseEnabled,
-                                             workpieceDisplayMode
+                                             workpieceDisplayMode,
+                                             processingTime,
+                                             setupTime,
+                                             equipmentCount,
+                                             assemblyUnitCount,
+                                             assemblyMode,
+                                             assemblyRecipes,
+                                             disassemblyUnitCount,
+                                             disassemblyMode,
+                                             disassemblyRecipes,
+                                             bufferCapacity,
+                                             minimumStayTime
                                          }) => {
     const target = placedComponents.value.find((item) => item.id === id)
     if (!target) return
@@ -427,32 +550,40 @@ const handleUpdateComponentProperties = ({
     if (target.type === 'connectionLine') {
         if (affectedEndpoint === 'to' || affectedEndpoint === 'from') target.affectedEndpoint = affectedEndpoint
         if (Number.isFinite(workpieceSpeed) && workpieceSpeed >= 0) target.workpieceSpeed = workpieceSpeed
-        if (length === undefined && angle === undefined) return
-        if (length !== undefined && (!Number.isFinite(length) || length < 0)) return
-        if (angle !== undefined && (!Number.isFinite(angle) || angle < -360 || angle > 360)) return
+        if (!connectionSegment && !connectionRadius && length === undefined && angle === undefined) return
         const geometry = getConnectionGeometry(target, placedComponents.value)
         if (!geometry || geometry.from.id === geometry.to.id) return
-        const nextLength = length ?? geometry.length
-        const nextAngle = angle ?? geometry.angle
-        const radians = nextAngle * Math.PI / 180
-        // 角度始终表示起点到终点的方向，移动起点时从固定终点反推。
-        const moveStart = target.affectedEndpoint === 'from'
-        const movingComponent = moveStart ? geometry.from : geometry.to
-        const fixedCenter = moveStart ? geometry.end : geometry.start
-        const movingCenter = moveStart ? geometry.start : geometry.end
-        const direction = moveStart ? -1 : 1
-        const x = Number((movingComponent.x + fixedCenter.x + direction * nextLength * Math.cos(radians) - movingCenter.x).toFixed(10))
-        const y = Number((movingComponent.y + fixedCenter.y + direction * nextLength * Math.sin(radians) - movingCenter.y).toFixed(10))
-        if (!Number.isFinite(x) || !Number.isFinite(y)) return
-        if (x !== movingComponent.x || y !== movingComponent.y) {
-            handleUpdateComponentPosition({id: movingComponent.id, x, y})
+        if (connectionRadius) {
+            const {index, radius} = connectionRadius
+            const row = Number.isInteger(index) && index >= 0 ? geometry.rows[index * 2 + 1] : null
+            if (!row || !Number.isFinite(radius) || radius < 0 || radius > row.maxRadius) return
+            target.cornerRadii = geometry.cornerRadii.map((current, i) => i === index ? radius : current)
+            return
         }
-        target.angle = nextAngle
+        const edit = connectionSegment ?? {index: 0, length, angle}
+        const update = getConnectionSegmentMove(geometry, edit.index, edit, target.affectedEndpoint ?? 'to')
+        if (!update) return
+        const {point, nodeIndex, endpoint} = update
+        target.affectedEndpoint = endpoint
+        if (geometry.nodes.length === 2) {
+            const moving = endpoint === 'from' ? geometry.from : geometry.to
+            const port = geometry.nodes[nodeIndex]
+            const x = Number((moving.x + point.x - port.x).toFixed(10))
+            const y = Number((moving.y + point.y - port.y).toFixed(10))
+            if (x !== moving.x || y !== moving.y) handleUpdateComponentPosition({id: moving.id, x, y})
+            target.angle = update.angle
+        } else {
+            target.waypoints = target.waypoints.map((waypoint, i) => i === nodeIndex - 1 ? point : waypoint)
+            target.segmentAngles = geometry.rows.filter(row => row.type === 'Line').map(row => row.index === edit.index ? update.angle : row.angle)
+            target.cornerRadii = geometry.cornerRadii
+            const adjusted = getConnectionGeometry(target, placedComponents.value)
+            if (adjusted) target.cornerRadii = adjusted.cornerRadii
+        }
         return
     }
 
     if (target.type === 'systemInput') {
-        const inputProperties = {generationInterval, firstGenerationTime, maxOutputCount, inputCloseTime, inputCloseEnabled, workpieceDisplayMode}
+        const inputProperties = {inputType, generationInterval, firstGenerationTime, maxOutputCount, inputCloseTime, inputCloseEnabled, workpieceDisplayMode}
         for (const [field, value] of Object.entries(inputProperties)) {
             if (isValidInputProperty(field, value)) target[field] = value
         }
@@ -460,6 +591,43 @@ const handleUpdateComponentProperties = ({
 
     if (target.type === 'systemInput' && Array.isArray(inputRuleRows)) {
         target.inputRuleRows = inputRuleRows.map(row => ({...row}))
+    }
+
+    if (target.type === 'workstation' || target.type === 'parallelWorkstation') {
+        for (const [field, value] of Object.entries({processingTime, setupTime})) {
+            if (isValidWorkstationProperty(field, value)) target[field] = value
+        }
+    }
+    if (target.type === 'parallelWorkstation' && isValidParallelWorkstationProperty('equipmentCount', equipmentCount)) {
+        target.equipmentCount = equipmentCount
+        ensureParallelWorkstationEquipment(target)
+    }
+    if (target.type === 'assemblyWorkstation') {
+        if (isValidAssemblyUnitCount(assemblyUnitCount)) target.assemblyUnitCount = assemblyUnitCount
+        if (Array.isArray(assemblyRecipes) && assemblyRecipes.every(recipe => !getAssemblyRecipeError(recipe))) {
+            target.assemblyRecipes = assemblyRecipes
+        }
+        if (ASSEMBLY_MODES.some(mode => mode.value === assemblyMode) && assemblyMode !== target.assemblyMode) {
+            // 旧 BOM 没有行级类型，按切换前的显示值保留其打包类型。
+            if (target.assemblyRecipes?.some(recipe => recipe.packingType == null)) {
+                target.assemblyRecipes = target.assemblyRecipes.map(recipe => recipe.packingType != null ? recipe : {
+                    ...recipe, packingType: getAssemblyPackingType(recipe, target.assemblyMode),
+                })
+            }
+            target.assemblyMode = assemblyMode
+        }
+    }
+    if (target.type === 'disassemblyWorkstation') {
+        if (isValidDisassemblyUnitCount(disassemblyUnitCount)) target.disassemblyUnitCount = disassemblyUnitCount
+        if (DISASSEMBLY_MODES.some(mode => mode.value === disassemblyMode)) target.disassemblyMode = disassemblyMode
+        if (Array.isArray(disassemblyRecipes) && disassemblyRecipes.every(recipe => !getDisassemblyRecipeError(recipe, {allowEmpty: true}))) {
+            target.disassemblyRecipes = disassemblyRecipes
+        }
+    }
+    if (target.type === 'buffer') {
+        for (const [field, value] of Object.entries({bufferCapacity, minimumStayTime})) {
+            if (isValidBufferProperty(field, value)) target[field] = value
+        }
     }
 
     if (target.type === 'AGVpath') {
@@ -481,17 +649,24 @@ const handleUpdateComponentProperties = ({
     }
 
     const {x: centerX, y: centerY} = getComponentCenter(target)
-    const nextWidth = Number.isFinite(width) ? width : target.width
-    const nextHeight = Number.isFinite(height) ? height : target.height
+    const updateWidth = Number.isFinite(width) && width > 0 && width !== target.width
+    const updateHeight = Number.isFinite(height) && height > 0 && height !== target.height
+    const previousPorts = (updateWidth || updateHeight) && RESIZABLE_COMPONENT_TYPES.has(target.type)
+        ? getLocalComponentPorts(target) : null
 
-    if (Number.isFinite(width)) {
-        target.width = nextWidth
-        target.x = target.type === 'node' ? centerX : centerX - nextWidth / 2
+    if (updateWidth) {
+        target.width = width
+        target.x = target.type === 'node' ? centerX : centerX - width / 2
     }
-    if (Number.isFinite(height)) {
-        target.height = nextHeight
-        target.y = target.type === 'node' ? centerY : centerY - nextHeight / 2
+    if (updateHeight) {
+        target.height = height
+        target.y = target.type === 'node' ? centerY : centerY - height / 2
     }
+    if (previousPorts) fitComponentPorts(target, previousPorts)
+    if ((rotationDelta === 1 || rotationDelta === -1) && RESIZABLE_COMPONENT_TYPES.has(target.type)) {
+        target.quarterTurns = (getComponentQuarterTurns(target) + rotationDelta + 4) % 4
+    }
+    if (portOffset) setComponentPortOffset(target, portOffset.key, portOffset.point)
     if (typeof shadowColor === 'string') target.shadowColor = shadowColor
     const station = STATION_TYPES.find((type) => type.value === stationType)
     if (target.type === 'node' && station) {
@@ -736,7 +911,8 @@ onBeforeUnmount(() => {
 
 // 暴露方法供 App.vue 调用
 defineExpose({
-    handleControlChange
+    handleControlChange,
+    getEquipmentStates
 })
 </script>
 

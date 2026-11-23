@@ -8,7 +8,7 @@ const {parse, compileTemplate} = require('@vue/compiler-sfc');
 
 const rules = vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../src/utils/inputRules.js'), 'utf8')
     .replace(/export (const|function) /g, '$1 ') +
-    '\n;({PART_COLORS, getInputRuleValidationMessage, getInputRuleProbabilities, sampleInputRule, INPUT_PROPERTY_DEFAULTS, isValidInputProperty, parseGenerationInterval, formatGenerationInterval, getDefaultWorkpieceDimensions})');
+    '\n;({PART_COLORS, getInputType, getInputRuleCategory, getInputRuleValidationMessage, getInputRuleProbabilities, sampleInputRule, INPUT_PROPERTY_DEFAULTS, isValidInputProperty, parseGenerationInterval, formatGenerationInterval, getDefaultWorkpieceDimensions})');
 const makeRows = weights => weights.map((relativeWeight, index) => ({partType: `Part${index + 1}`, relativeWeight}));
 
 test('generation interval defaults to one minute and supports duration formats with milliseconds', () => {
@@ -80,33 +80,39 @@ function createDialog(savedRows = []) {
         window: {innerWidth: 1440, innerHeight: 900},
     };
     const state = scope.run(() => vm.runInNewContext(descriptor.scriptSetup.content.replace(/^import .*;\r?$/gm, '') +
-        '\n;({rows, selectedRow, validationMessage, addRow, deleteRow, clearRows, saveDialog, openColorPicker})', context));
+        '\n;({rows, columns, selectedRow, validationMessage, addRow, deleteRow, clearRows, saveDialog, openColorPicker})', context));
     return {state, events, props, dispose: () => scope.stop()};
 }
 
-test('dialog edits four fields in a draft and saves to its captured item', () => {
-    const savedRows = [{partType: 'Part1', name: 'old', length: 1000, width: 500, fillColor: '#00ff00', relativeWeight: 100}];
-    const {state, events, dispose} = createDialog(savedRows);
-    Object.assign(state.rows.value[0], {partType: 'Bolt', name: '螺栓', fillColor: '#123456', relativeWeight: 25});
-    assert.equal(savedRows[0].partType, 'Part1');
+test('input type changes the labels without changing rule categories or clearing drafts', () => {
+    const savedRows = [{entityType: 'Pallet', name: 'old', length: 1000, width: 500, fillColor: '#00ff00', relativeWeight: 100}];
+    const {state, events, props, dispose} = createDialog(savedRows);
+    assert.equal(state.columns.value[0].label, 'Workpiece类别');
+    assert.equal(state.rows.value[0].partType, 'Pallet');
+    Object.assign(state.rows.value[0], {partType: ' 车架 ', name: '车辆', fillColor: '#123456', relativeWeight: 25});
+    props.item.inputType = 'Vehicle';
+    assert.equal(state.columns.value[0].label, 'Vehicle类别');
+    assert.equal(state.columns.value[1].label, 'Vehicle名称');
+    assert.equal(savedRows[0].name, 'old');
     state.saveDialog();
     assert.equal(events[0].payload.itemId, 'input-1');
     assert.equal(events[0].payload.dialogType, 'input-rule');
     assert.deepEqual(JSON.parse(JSON.stringify(events[0].payload.properties.inputRuleRows)),
-        [{partType: 'Bolt', name: '螺栓', length: 1000, width: 500, fillColor: '#123456', relativeWeight: 25}]);
+        [{partType: '车架', name: '车辆', length: 1000, width: 500, fillColor: '#123456', relativeWeight: 25}]);
     dispose();
 });
 
-test('new rows use seven colors and keep increasing Part numbers after deletion', () => {
+test('new rows default to Workpiece and continue cycling through seven colors after deletion', () => {
     const {state, dispose} = createDialog();
     for (let index = 0; index < 7; index++) state.addRow();
     assert.equal(new Set(state.rows.value.map(row => row.fillColor)).size, 7);
     state.deleteRow();
     state.addRow();
-    assert.equal(state.rows.value.at(-1).partType, 'Part8');
+    assert.equal(state.rows.value.at(-1).partType, 'Workpiece');
+    assert.equal(state.rows.value.at(-1).fillColor, rules.PART_COLORS[0]);
     state.clearRows();
     state.addRow();
-    assert.equal(state.rows.value[0].partType, 'Part1');
+    assert.equal(state.rows.value[0].partType, 'Workpiece');
     dispose();
 });
 

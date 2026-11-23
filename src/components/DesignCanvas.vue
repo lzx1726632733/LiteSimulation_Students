@@ -20,6 +20,7 @@
                 @pointerenter="handleMouseEnter"
                 @wheel.prevent="handleWheel"
                 @auxclick.prevent
+                @contextmenu="handleCanvasContextMenu"
                 @dblclick="handleDoubleClick"
             ></canvas>
             <span ref="workpieceTooltipAnchor" class="workpiece-tooltip-anchor" aria-hidden="true"></span>
@@ -63,16 +64,21 @@ import {
     DEFAULT_STATION_SIZE,
     getStationType,
     getNextStationIndex,
-    getComponentBounds,
-    getComponentCenter
+    getComponentCenter,
+    getComponentFootprint,
+    getComponentQuarterTurns
 } from "../utils/stations.js";
+import {getComponentPorts, getComponentPortPosition} from "../utils/componentPorts.js";
+import {getConnectionGeometry} from "../utils/connectionLine.js";
 import {
     DEFAULT_PATH_WIDTH,
     getPathWidth,
     buildPathGeometry,
     pointOnPathSegment,
+    distanceToPathSegment,
     tracePathGeometry,
     isPointInPathArea,
+    getPathGeometryBounds,
     getPathBounds
 } from "../utils/agvPath.js";
 import {
@@ -221,10 +227,10 @@ let dragOrigins = [];
 let shiftClickId = null;
 let keepSelectionOnClick = false;
 
-// 拖拽 AGV 路径拐点的状态
+// 拖拽路径拐点的状态
 const draggingCorner = ref(false); // 是否正在拖拽拐点
 const dragPathId = ref(null); // 正在拖拽拐点所属的路径 id
-const dragCornerIndex = ref(null); // 正在拖拽的拐点在 nodes 数组中的索引
+const dragCornerIndex = ref(null);
 const dragCornerOriginX = ref(0); // 拐点原始位置 x
 const dragCornerOriginY = ref(0); // 拐点原始位置 y
 
@@ -248,8 +254,11 @@ const labelInput = ref(null);
 
 // 连接线模式状态
 const connectionLineMode = ref(false); // 是否处于连接线模式
-const firstComponent = ref(null); // 第一个被点击的控件
+const firstPort = ref(null);
+const connectionWaypoints = ref([]);
 const tempLineEnd = ref(null); // 临时连接线终点（鼠标位置）
+const CONNECTION_PORT_GRAB = 8;
+const CONNECTION_HANDLE_SIZE = 8;
 
 // AGV 路径模式状态
 const agvPathMode = ref(false); // 是否处于 AGV 路径绘制模式
@@ -317,10 +326,7 @@ watch(
         agvPathMode.value = isAGVPathMode;
 
         // 重置连接线状态
-        if (!isLineMode) {
-            firstComponent.value = null;
-            tempLineEnd.value = null;
-        }
+        if (!isLineMode) clearConnectionDraft();
 
         // 重置 AGV 路径状态
         if (!isAGVPathMode) {
@@ -674,10 +680,11 @@ const drawSingleComponent = (ctx, component) => {
     }
 
     // 控件矩形（世界坐标 → 像素）
-    const px = toPx(component.x);
-    const py = toScreenY(component.y + component.height);
-    const pw = toPx(component.width);
-    const ph = toPx(component.height);
+    const bounds = getComponentFootprint(component);
+    const px = toPx(bounds.x);
+    const py = toScreenY(bounds.y + bounds.height);
+    const pw = toPx(bounds.width);
+    const ph = toPx(bounds.height);
 
     if (RESIZABLE_COMPONENT_TYPES.has(component.type)) {
         const shadowColor = component.shadowColor || DEFAULT_COMPONENT_SHADOW_COLORS[component.type];
@@ -703,13 +710,16 @@ const drawSingleComponent = (ctx, component) => {
         // 图标居中绘制，大小取固定值与控件像素尺寸的较小者，避免小控件上图标溢出
         const iconSize = Math.min(ICON_SIZE_PX, pw, ph);
         if (iconSize > 0) {
-            ctx.drawImage(
-                img,
-                px + (pw - iconSize) / 2,
-                py + (ph - iconSize) / 2,
-                iconSize,
-                iconSize,
-            );
+            const turns = getComponentQuarterTurns(component);
+            if (turns) {
+                ctx.save();
+                ctx.translate(px + pw / 2, py + ph / 2);
+                ctx.rotate(turns * Math.PI / 2);
+                ctx.drawImage(img, -iconSize / 2, -iconSize / 2, iconSize, iconSize);
+                ctx.restore();
+            } else {
+                ctx.drawImage(img, px + (pw - iconSize) / 2, py + (ph - iconSize) / 2, iconSize, iconSize);
+            }
         }
     } else if (!imageCache.has(component.icon)) {
         // 图片未缓存，预加载
@@ -746,20 +756,29 @@ const drawPlacedComponents = (ctx) => {
         .filter((component) => component.type === "connectionLine")
         .forEach((line) => drawConnectionLine(ctx, line));
 
-    // 绘制临时连接线（连接线模式且已选中第一个控件）
-    if (connectionLineMode.value && firstComponent.value && tempLineEnd.value) {
-        drawTempConnectionLine(ctx);
-    }
+    if (connectionLineMode.value && firstPort.value) drawTempConnectionLine(ctx);
+    if (agvPathMode.value && agvStartNode.value && agvPathPoints.value.length > 0) drawTempAGVPath(ctx);
 
-    // 绘制临时 AGV 路径（AGV 路径模式且已选中起点站点）
-    if (agvPathMode.value && agvStartNode.value && agvPathPoints.value.length > 0) {
-        drawTempAGVPath(ctx);
+    // 圆圈画在线体上方，只显示位置，不作为可拖动的对象。
+    ctx.save();
+    ctx.lineWidth = 2;
+    ctx.fillStyle = "#ffffff";
+    for (const component of props.placedComponents) {
+        for (const {key, color} of getComponentPorts(component)) {
+            const point = getComponentPortPosition(component, key);
+            ctx.beginPath();
+            ctx.arc(toPx(point.x), toScreenY(point.y), 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = color;
+            ctx.stroke();
+        }
     }
+    ctx.restore();
 };
 
 // 站点中心坐标保持不变，矩形宽高随视图比例缩放。
 const drawNodeComponent = (ctx, component) => {
-    const bounds = getComponentBounds(component);
+    const bounds = getComponentFootprint(component);
     const style = getStationType(component);
     const x = toPx(bounds.x);
     const y = toScreenY(bounds.y + bounds.height);
@@ -788,7 +807,7 @@ const drawComponentLabel = (ctx, component) => {
     ctx.textBaseline = "top";
     ctx.fillStyle = "#333333";
 
-    const bounds = getComponentBounds(component);
+    const bounds = getComponentFootprint(component);
     const centerX = toPx(bounds.x + bounds.width / 2);
     const labelY = toScreenY(bounds.y) + LABEL_GAP;
 
@@ -823,28 +842,9 @@ const ARROW_HALF_ANGLE = Math.PI / 7; // 箭头张角的一半
 // 箭头画在线段中点，用这个长度把三角形沿轴向居中
 const ARROW_AXIAL = ARROW_SLANT * Math.cos(ARROW_HALF_ANGLE);
 
-// 求中心连线与控件矩形边框的交点，让线从图标边缘起止而不是从中心穿出，
-// 避免线体钻进图标下方
-const clipToComponentEdge = (component, centerX, centerY, dirX, dirY) => {
-    if (dirX === 0 && dirY === 0) return {x: centerX, y: centerY};
-
-    const halfW = component.width / 2;
-    const halfH = component.height / 2;
-
-    // 分别求与竖边、横边相交所需的缩放系数，取先碰到的那条边
-    const scaleX = dirX === 0 ? Infinity : halfW / Math.abs(dirX);
-    const scaleY = dirY === 0 ? Infinity : halfH / Math.abs(dirY);
-    const scale = Math.min(scaleX, scaleY);
-
-    return {
-        x: centerX + dirX * scale,
-        y: centerY + dirY * scale,
-    };
-};
-
 // 由两点算出一条带箭头的线段的完整几何：
-// start    起点（已收缩到起点控件边缘）
-// end      终点（已收缩到终点控件边缘），线体一直画到这里
+// start    起点
+// end      终点，线体一直画到这里
 // arrowTip 箭尖位置。箭头画在线段中点并沿轴向居中，因此箭尖落在
 //          中点前方半个箭头长度处，三角形整体正好被中点平分
 // slant    本次实际使用的箭头斜边长（空间不足时等比缩小）
@@ -855,7 +855,7 @@ const computeLineGeometry = (startPoint, endPoint) => {
     const dy = endPoint.y - startPoint.y;
     const length = Math.hypot(dx, dy);
 
-    // 长度为 0：两控件中心重合或完全遮挡，无可绘制内容
+    // 长度为 0：两点几乎重合，无可绘制内容
     if (length < 0.5) return null;
 
     // 单位方向向量，后续所有沿线偏移都基于它，避免重复三角函数运算
@@ -890,73 +890,6 @@ const computeLineGeometry = (startPoint, endPoint) => {
     };
 };
 
-// 解出一条连接线的两个端点（各自收缩到控件图标边缘）。
-// 绘制与命中判定共用，保证"看到的线"和"点得到的线"完全一致；
-// 内部把世界坐标（米）换算成像素，后续几何计算与绘制都工作在像素域
-const resolveLineEndpoints = (line) => {
-    const fromComp = props.placedComponents.find((c) => c.id === line.fromId);
-    const toComp = props.placedComponents.find((c) => c.id === line.toId);
-    if (!fromComp || !toComp) return null;
-
-    const fromCenter = getComponentCenter(fromComp);
-    const toCenter = getComponentCenter(toComp);
-    const fromCenterX = toPx(fromCenter.x);
-    const fromCenterY = toScreenY(fromCenter.y);
-    const toCenterX = toPx(toCenter.x);
-    const toCenterY = toScreenY(toCenter.y);
-
-    const dirX = toCenterX - fromCenterX;
-    const dirY = toCenterY - fromCenterY;
-
-    // 图标边界（像素）：图标居中于控件矩形，大小为 ICON_SIZE_PX 与控件像素尺寸的较小者
-    const createIconBounds = (comp, centerX, centerY) => {
-        const pw = toPx(comp.width);
-        const ph = toPx(comp.height);
-        const size = Math.min(ICON_SIZE_PX, pw, ph);
-        return {
-            x: centerX - size / 2,
-            y: centerY - size / 2,
-            width: size,
-            height: size,
-        };
-    };
-
-    const fromIcon = createIconBounds(fromComp, fromCenterX, fromCenterY);
-    const toIcon = createIconBounds(toComp, toCenterX, toCenterY);
-
-    return {
-        start: clipToComponentEdge(fromIcon, fromCenterX, fromCenterY, dirX, dirY),
-        end: clipToComponentEdge(toIcon, toCenterX, toCenterY, -dirX, -dirY),
-    };
-};
-
-// 绘制连接线（已放置的）
-const drawConnectionLine = (ctx, line) => {
-    const endpoints = resolveLineEndpoints(line);
-    if (!endpoints) return;
-
-    const geo = computeLineGeometry(endpoints.start, endpoints.end);
-    if (!geo) return;
-
-    // 选中状态高亮
-    const isSelected = isComponentSelected(line.id);
-    const color = isSelected ? LINE_COLOR_SELECTED : LINE_COLOR;
-
-    // 线体：整段画满。箭头在中间且为实心，会盖住下面这段线，不会露出接缝
-    ctx.strokeStyle = color;
-    ctx.lineWidth = isSelected ? LINE_WIDTH_SELECTED : LINE_WIDTH;
-    ctx.beginPath();
-    ctx.moveTo(geo.start.x, geo.start.y);
-    ctx.lineTo(geo.end.x, geo.end.y);
-    ctx.stroke();
-
-    // 箭头（在线段中点，指向第二个被点击的控件）
-    drawArrow(ctx, geo, color);
-
-    // 线上不画名称：后续要在线上跑动画，标签会挡住。
-    // 名称在模型树和属性面板里可以看到
-};
-
 // 绘制实心三角箭头。箭尖位置由 geo.arrowTip 给出（线段中点前方半个箭头），
 // 方向由 geo 的单位向量给出，直接旋转 ±halfAngle 得到两个后角，无需再算 atan2
 const drawArrow = (ctx, geo, color) => {
@@ -980,54 +913,74 @@ const drawArrow = (ctx, geo, color) => {
     ctx.fill();
 };
 
-// 绘制临时连接线（已点第一个控件，虚线跟随鼠标预览）
+const connectionScreenPoint = (point) => ({x: toPx(point.x), y: toScreenY(point.y)});
+
+const connectionArrow = (segment) => {
+    if (!segment.length) return null;
+    if (segment.type === 'line') return computeLineGeometry(connectionScreenPoint(segment.start), connectionScreenPoint(segment.end));
+    const {x, y, ux, uy} = pointOnPathSegment(segment, 0.5);
+    const half = segment.length / 2;
+    return computeLineGeometry(connectionScreenPoint({x: x - ux * half, y: y - uy * half}),
+        connectionScreenPoint({x: x + ux * half, y: y + uy * half}));
+};
+
+const drawConnectionLine = (ctx, line) => {
+    const route = getConnectionGeometry(line, props.placedComponents);
+    if (!route) return;
+    const selected = isComponentSelected(line.id);
+    const color = selected ? LINE_COLOR_SELECTED : LINE_COLOR;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = selected ? LINE_WIDTH_SELECTED : LINE_WIDTH;
+    ctx.lineJoin = 'round';
+    if (route.length > 0) {
+        tracePathGeometry(ctx, route.segments, ppm.value);
+        ctx.stroke();
+        for (const segment of route.segments) {
+            const arrow = connectionArrow(segment);
+            if (arrow) drawArrow(ctx, arrow, color);
+        }
+    }
+    if (selected) {
+        const half = CONNECTION_HANDLE_SIZE / 2;
+        ctx.fillStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        for (const point of route.nodes.slice(1, -1)) {
+            const {x, y} = connectionScreenPoint(point);
+            ctx.fillRect(x - half, y - half, CONNECTION_HANDLE_SIZE, CONNECTION_HANDLE_SIZE);
+            ctx.strokeRect(x - half, y - half, CONNECTION_HANDLE_SIZE, CONNECTION_HANDLE_SIZE);
+        }
+    }
+    ctx.restore();
+};
+
+// 已落点用实线，下一段用虚线跟随鼠标。
 const drawTempConnectionLine = (ctx) => {
-    const from = firstComponent.value;
-    const center = getComponentCenter(from);
-    const fromCenterX = toPx(center.x);
-    const fromCenterY = toScreenY(center.y);
-    const tip = {x: toPx(tempLineEnd.value.x), y: toScreenY(tempLineEnd.value.y)};
-
-    // 图标边界（像素）：图标居中于控件矩形
-    const pw = toPx(from.width);
-    const ph = toPx(from.height);
-    const iconSize = Math.min(ICON_SIZE_PX, pw, ph);
-    const fromIcon = {
-        x: fromCenterX - iconSize / 2,
-        y: fromCenterY - iconSize / 2,
-        width: iconSize,
-        height: iconSize,
-    };
-
-    // 起点收缩到图标边缘；终点是鼠标位置，不收缩
-    const start = clipToComponentEdge(
-        fromIcon,
-        fromCenterX,
-        fromCenterY,
-        tip.x - fromCenterX,
-        tip.y - fromCenterY,
-    );
-
-    // 高亮起点控件，提示当前正从它拉线（线可能很短，先画框保证一直可见）
+    const {component, key} = firstPort.value;
+    const start = connectionScreenPoint(getComponentPortPosition(component, key));
+    const bounds = getComponentFootprint(component);
+    ctx.save();
     ctx.strokeStyle = LINE_COLOR;
     ctx.lineWidth = LINE_WIDTH;
-    ctx.strokeRect(toPx(from.x) - 1, toScreenY(from.y + from.height) - 1, pw + 2, ph + 2);
-
-    const geo = computeLineGeometry(start, tip);
-    if (!geo) return;
-
-    // 虚线表示尚未确认，同样画满全长
-    ctx.strokeStyle = LINE_COLOR;
-    ctx.lineWidth = LINE_WIDTH;
-    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(toPx(bounds.x) - 1, toScreenY(bounds.y + bounds.height) - 1,
+        toPx(bounds.width) + 2, toPx(bounds.height) + 2);
     ctx.beginPath();
-    ctx.moveTo(geo.start.x, geo.start.y);
-    ctx.lineTo(geo.end.x, geo.end.y);
+    ctx.moveTo(start.x, start.y);
+    let tail = start;
+    for (const point of connectionWaypoints.value) {
+        tail = connectionScreenPoint(point);
+        ctx.lineTo(tail.x, tail.y);
+    }
     ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 箭头压在虚线中点上，方向即当前拉线方向
-    drawArrow(ctx, geo, LINE_COLOR);
+    if (tempLineEnd.value) {
+        const tip = connectionScreenPoint(tempLineEnd.value);
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(tail.x, tail.y);
+        ctx.lineTo(tip.x, tip.y);
+        ctx.stroke();
+    }
+    ctx.restore();
 };
 
 // AGV 路径颜色
@@ -1134,7 +1087,7 @@ const drawTempAGVPath = (ctx) => {
     ctx.save();
     ctx.strokeStyle = AGV_PATH_COLOR;
     ctx.lineWidth = 2;
-    const bounds = getComponentBounds(agvStartNode.value);
+    const bounds = getComponentFootprint(agvStartNode.value);
     ctx.strokeRect(toPx(bounds.x) - 1, toScreenY(bounds.y + bounds.height) - 1,
         toPx(bounds.width) + 2, toPx(bounds.height) + 2);
     ctx.restore();
@@ -1201,7 +1154,7 @@ const alignToComponents = (raw, fallback, excludedIds, event, lockedAxis = null)
     const viewportHeight = canvasHeight.value / ppm.value;
     const targets = props.placedComponents
         .filter((item) => isMovableComponent(item) && !excludedIds.has(item.id))
-        .map((item) => ({id: item.id, ...getComponentBounds(item)}))
+        .map((item) => ({id: item.id, ...getComponentFootprint(item)}))
         .filter((item) =>
             Number.isFinite(item.x) && Number.isFinite(item.y) &&
             item.x + (item.width ?? 0) >= viewOrigin.value.x - margin &&
@@ -1294,7 +1247,7 @@ const hitTestComponent = (x, y) => {
         const component = props.placedComponents[i];
         if (component.type === "connectionLine" || component.type === "AGVpath") continue;
 
-        const bounds = getComponentBounds(component);
+        const bounds = getComponentFootprint(component);
         // 包括站点在内，按实际矩形区域命中。
         if (
             x >= bounds.x &&
@@ -1348,6 +1301,22 @@ const hitTestAGVCorner = (x, y) => {
     return null;
 };
 
+const hitTestConnectionCorner = (line, x, y, includeHandles) => {
+    const route = getConnectionGeometry(line, props.placedComponents);
+    if (!route) return null;
+    const tolerance = toMeters(CONNECTION_HANDLE_SIZE / 2 + LINE_GRAB_MARGIN);
+    // 靠近端口时保留组件的选择，避免把端口误当成重合的拐点。
+    if ([route.start, route.end].some(point => Math.hypot(x - point.x, y - point.y) <= tolerance)) return null;
+    if (includeHandles) {
+        const index = route.nodes.slice(1, -1).findIndex(point => Math.abs(x - point.x) <= tolerance && Math.abs(y - point.y) <= tolerance);
+        if (index >= 0) return {pathId: line.id, cornerIndex: index};
+    }
+    const arc = route.segments.find(segment => segment.type === 'arc' && distanceToPathSegment(segment, x, y) <= tolerance);
+    return arc ? {pathId: line.id, cornerIndex: arc.cornerIndex} : null;
+};
+
+const getDraggablePathCorner = (path, index) => (path?.type === 'connectionLine' ? path.waypoints : path?.nodes)?.[index];
+
 // 命中测试：返回名称标签落在鼠标坐标下的控件（后放置的优先），无则返回 null。
 // 包围盒来自绘制时记录的 labelRects（米），外扩 LABEL_HIT_PADDING 便于点中
 const hitTestLabel = (x, y) => {
@@ -1374,49 +1343,15 @@ const hitTestLabel = (x, y) => {
 // 细线难以精确点中，在实际绘制宽度外再放宽这些像素作为抓取余量
 const LINE_GRAB_MARGIN = 3;
 
-// 点到线段的距离（超出端点时取到端点的距离，而非到无限延长线的距离）
-const distanceToSegment = (px, py, ax, ay, bx, by) => {
-    const dx = bx - ax;
-    const dy = by - ay;
-    const lengthSquared = dx * dx + dy * dy;
-
-    // 线段退化为点
-    if (lengthSquared === 0) return Math.hypot(px - ax, py - ay);
-
-    // 投影参数夹到 [0,1]，保证落点在线段内
-    let t = ((px - ax) * dx + (py - ay) * dy) / lengthSquared;
-    t = Math.max(0, Math.min(1, t));
-
-    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-};
-
-// 连接线命中判定：命中区域 = 线体（按线宽加抓取余量）∪ 箭头三角形
-// 两者都按实际绘制出来的几何计算，所以"点得到的"和"看到的"一致
 const hitTestConnectionLine = (line, x, y) => {
-    const endpoints = resolveLineEndpoints(line);
-    if (!endpoints) return false;
-
-    const geo = computeLineGeometry(endpoints.start, endpoints.end);
-    if (!geo) return false;
-
-    // 几何与线宽都在像素域，把传入的世界坐标（米）转成像素再判定
-    const px = toPx(x);
-    const py = toScreenY(y);
-
-    // 线体：容差取半线宽 + 抓取余量。选中时线更粗，用较大的那个保证一致手感
-    const halfWidth = LINE_WIDTH_SELECTED / 2;
-    const tolerance = halfWidth + LINE_GRAB_MARGIN;
-
-    // 用 start→end 整段做距离判定，顺带覆盖箭头的中轴区域
-    if (
-        distanceToSegment(px, py, geo.start.x, geo.start.y, geo.end.x, geo.end.y) <=
-        tolerance
-    ) {
-        return true;
-    }
-
-    // 箭头两侧比线宽得多，单靠中轴距离判不到，补一次三角形内部判定
-    return isPointInArrow(px, py, geo);
+    const route = getConnectionGeometry(line, props.placedComponents);
+    const tolerance = toMeters(LINE_WIDTH_SELECTED / 2 + LINE_GRAB_MARGIN);
+    return !!route?.segments.some(segment => {
+        if (!segment.length) return false;
+        if (distanceToPathSegment(segment, x, y) <= tolerance) return true;
+        const arrow = connectionArrow(segment);
+        return arrow && isPointInArrow(toPx(x), toScreenY(y), arrow);
+    });
 };
 
 // 判断点是否落在箭头三角形内（含 LINE_GRAB_MARGIN 的外扩）。
@@ -1625,17 +1560,16 @@ const updateSelectionBox = (position) => {
     // 连接线按可见线段判断；AGV 通道需完整落入选框才能选中。
     const enclosed = props.placedComponents.filter((item) => {
         if (item.type === "connectionLine") {
-            const endpoints = resolveLineEndpoints(item);
-            if (!endpoints || !computeLineGeometry(endpoints.start, endpoints.end)) return false;
-            return [endpoints.start, endpoints.end].every((point) =>
-                containsPoint(toMeters(point.x), -toMeters(point.y))
-            );
+            const route = getConnectionGeometry(item, props.placedComponents);
+            if (!route?.length) return false;
+            const bounds = getPathGeometryBounds(route.segments);
+            return containsPoint(bounds.minX, bounds.minY) && containsPoint(bounds.maxX, bounds.maxY);
         }
         if (item.type === "AGVpath") {
             const bounds = getPathBounds(item);
             return bounds && containsPoint(bounds.minX, bounds.minY) && containsPoint(bounds.maxX, bounds.maxY);
         }
-        const bounds = getComponentBounds(item);
+        const bounds = getComponentFootprint(item);
         return isMovableComponent(item) && containsPoint(bounds.x, bounds.y) &&
             containsPoint(bounds.x + bounds.width, bounds.y + bounds.height);
     }).map((item) => item.id);
@@ -1676,9 +1610,93 @@ const toggleComponentSelection = (id) => {
     emit("select-components", isComponentSelected(id) ? ids.filter((selected) => selected !== id) : [...ids, id]);
 };
 
+function clearConnectionDraft() {
+    firstPort.value = null;
+    connectionWaypoints.value = [];
+    tempLineEnd.value = null;
+}
+
+const cancelConnectionDraft = () => {
+    if (!firstPort.value) return;
+    clearConnectionDraft();
+    emit("add-log", "连接线：已取消当前绘制");
+    drawGrid();
+};
+
+const handleCanvasContextMenu = (event) => {
+    if (connectionLineMode.value) event.preventDefault();
+};
+
+const findConnectionPort = (position) => {
+    const first = firstPort.value;
+    const keys = first ? [first.key === 'loadPoint' ? 'unloadPoint' : 'loadPoint'] : ['unloadPoint', 'loadPoint'];
+    let nearest = null;
+    let closest = toMeters(CONNECTION_PORT_GRAB);
+    for (const component of [...props.placedComponents].reverse()) {
+        if (component.type === 'node' || component.id === first?.component.id) continue;
+        for (const key of keys) {
+            const point = getComponentPortPosition(component, key);
+            if (!point) continue;
+            const distance = Math.hypot(position.x - point.x, position.y - point.y);
+            if (distance > closest || (nearest && distance === closest)) continue;
+            closest = distance;
+            nearest = {component, key, point};
+        }
+    }
+    return nearest;
+};
+
+const placeConnectionPoint = (position) => {
+    const port = findConnectionPort(position);
+    const first = firstPort.value;
+    if (!port) {
+        if (first) {
+            const point = {x: snapToStep(position.x), y: snapToStep(position.y)};
+            const last = connectionWaypoints.value.at(-1) ?? getComponentPortPosition(first.component, first.key);
+            if (Math.hypot(point.x - last.x, point.y - last.y) > 1e-9) connectionWaypoints.value.push(point);
+            tempLineEnd.value = point;
+            drawGrid();
+        } else {
+            const hit = hitTestComponent(position.x, position.y);
+            emit("add-log", hit?.type === 'node' ? "连接线：不能连接站点，请使用 AGV 路径连接站点" : "连接线：请点击组件的上料点或下料点");
+        }
+        return;
+    }
+    if (!first) {
+        firstPort.value = port;
+        tempLineEnd.value = port.point;
+        emit("add-log", "连接线：已选择起点 " + getComponentLabel(port.component));
+        drawGrid();
+        return;
+    }
+    // 两端均可作为落笔端，模型中的运输方向统一为下料点到上料点。
+    const forward = first.key === 'unloadPoint';
+    const from = forward ? first.component : port.component;
+    const to = forward ? port.component : first.component;
+    const waypoints = [...connectionWaypoints.value];
+    if (!forward) waypoints.reverse();
+    const index = getNextIndexForType("connectionLine");
+    const line = {
+        id: createComponentId(), type: "connectionLine", name: "连接线", index,
+        icon: props.activeControl.icon, tabId: props.activeControl.tabId,
+        fromId: from.id, toId: to.id, fromName: getComponentLabel(from), toName: getComponentLabel(to),
+        waypoints,
+    };
+    emit("component-placed", line);
+    emit("add-log", '新建对象，类型：connectionLine，编号：连接线' + index + '，连接：' + line.fromName + ' → ' + line.toName);
+    clearConnectionDraft();
+    emit("placement-done");
+    drawGrid();
+};
+
 // 鼠标事件处理
 const handleMouseDown = async (e) => {
     clearWorkpieceHover();
+    if (e.button === 2 && connectionLineMode.value) {
+        e.preventDefault();
+        cancelConnectionDraft();
+        return;
+    }
     if (e.button !== 0 && e.button !== 1) return;
     if (panning.value || selectionBox.value || dragging.value || draggingCorner.value) return;
     // 对齐参考线
@@ -1764,80 +1782,8 @@ const handleMouseDown = async (e) => {
         return;
     }
 
-    // 连接线模式：点击控件选择起点和终点
     if (connectionLineMode.value) {
-        const pos = getCanvasMousePosition(e);
-        const hit = hitTestComponent(pos.x, pos.y);
-
-        // 忽略点击连接线自身
-        if (hit && hit.type === "connectionLine") {
-            return;
-        }
-
-        if (!hit) {
-            // 点击空白处，取消连接线模式
-            firstComponent.value = null;
-            tempLineEnd.value = null;
-            drawGrid();
-            return;
-        }
-
-        if (hit.type === "node") {
-            emit("add-log", "连接线：不能连接站点，请使用 AGV 路径连接站点");
-            return;
-        }
-
-        if (!firstComponent.value) {
-            // 选择第一个控件
-            firstComponent.value = hit;
-            emit("add-log", `连接线：已选择起点 ${getComponentLabel(hit)}`);
-            drawGrid();
-        } else {
-            // 选择第二个控件，创建连接线
-            if (hit.id === firstComponent.value.id) {
-                // 不能连接自己
-                emit("add-log", `连接线：不能连接同一个控件`);
-                return;
-            }
-
-            // 计算序号
-            const index = getNextIndexForType("connectionLine");
-
-            // 生成唯一 id
-            const id = createComponentId();
-
-            // 创建连接线对象
-            const connectionLine = {
-                id,
-                type: "connectionLine",
-                name: "连接线",
-                icon: props.activeControl.icon,
-                tabId: props.activeControl.tabId,
-                index,
-                fromId: firstComponent.value.id,
-                toId: hit.id,
-                fromName: getComponentLabel(firstComponent.value),
-                toName: getComponentLabel(hit),
-            };
-
-            // 通知父组件新增控件
-            emit("component-placed", connectionLine);
-
-            // 输出日志
-            emit(
-                "add-log",
-                `新建对象，类型：connectionLine，编号：连接线${index}，连接：${connectionLine.fromName} → ${connectionLine.toName}`
-            );
-
-            // 重置状态
-            firstComponent.value = null;
-            tempLineEnd.value = null;
-
-            // 通知父组件放置完成，重置为"选择"状态
-            emit("placement-done");
-
-            drawGrid();
-        }
+        placeConnectionPoint(getCanvasMousePosition(e));
         return;
     }
 
@@ -1845,27 +1791,26 @@ const handleMouseDown = async (e) => {
     if (!shouldShowCustomCursor.value) {
         const pos = getCanvasMousePosition(e);
 
-        // 优先检测是否点击了 AGV 路径的拐点
-        const cornerHit = hitTestAGVCorner(pos.x, pos.y);
+        const selected = props.placedComponents.find(item => item.id === props.selectedId);
+        let cornerHit = hitTestConnectionCorner(selected, pos.x, pos.y, true) ?? hitTestAGVCorner(pos.x, pos.y);
+        const hit = cornerHit ? props.placedComponents.find(item => item.id === cornerHit.pathId) : hitTestComponent(pos.x, pos.y);
+        if (!cornerHit && hit?.type === 'connectionLine' && hit !== selected) {
+            cornerHit = hitTestConnectionCorner(hit, pos.x, pos.y, false);
+        }
         if (cornerHit && !e.shiftKey) {
             // 开始拖拽拐点
             draggingCorner.value = true;
             dragPathId.value = cornerHit.pathId;
             dragCornerIndex.value = cornerHit.cornerIndex;
 
-            const path = props.placedComponents.find((c) => c.id === cornerHit.pathId);
-            const corner = path.nodes[cornerHit.cornerIndex];
+            const corner = getDraggablePathCorner(hit, cornerHit.cornerIndex);
             dragCornerOriginX.value = corner.x;
             dragCornerOriginY.value = corner.y;
             dragOffsetX.value = pos.x - corner.x;
             dragOffsetY.value = pos.y - corner.y;
-
+            if (!isComponentSelected(hit.id)) emit('select-component', hit.id);
             return;
         }
-
-        const hit = cornerHit
-            ? props.placedComponents.find((item) => item.id === cornerHit.pathId)
-            : hitTestComponent(pos.x, pos.y);
 
         // 点在名称标签上：只选中不拖拽。双击改名的第一次 mousedown 会走到这里，
         // 若按"空白处"处理会先把控件取消选中，标签闪一下再进输入框
@@ -1916,7 +1861,7 @@ const handleMouseDown = async (e) => {
                     type: item.type,
                     x: item.x,
                     y: item.y,
-                    bounds: getComponentBounds(item)
+                    bounds: getComponentFootprint(item)
                 }));
         } else {
             emit("select-component", hit.id);
@@ -2040,16 +1985,18 @@ const handleMouseMove = (e) => {
         return;
     }
 
-    // 拖拽 AGV 路径拐点：拐点跟随鼠标，对齐到小网格线交点
+    // 拖拽路径拐点，保留鼠标相对拐点的抓取偏移。
     if (draggingCorner.value && dragPathId.value !== null && dragCornerIndex.value !== null) {
         const path = props.placedComponents.find((c) => c.id === dragPathId.value);
-        if (!path || !path.nodes) return;
+        const index = dragCornerIndex.value;
+        const corner = getDraggablePathCorner(path, index);
+        if (!corner) return;
 
         // 对齐到小网格线交点
-        let newX = Number((dragCornerOriginX.value +
-            snapToStep(pos.x - dragOffsetX.value - dragCornerOriginX.value)).toFixed(10));
-        let newY = Number((dragCornerOriginY.value +
-            snapToStep(pos.y - dragOffsetY.value - dragCornerOriginY.value)).toFixed(10));
+        const offsetX = snapToStep(pos.x - dragOffsetX.value - dragCornerOriginX.value);
+        const offsetY = snapToStep(pos.y - dragOffsetY.value - dragCornerOriginY.value);
+        let newX = offsetX ? Number((dragCornerOriginX.value + offsetX).toFixed(10)) : dragCornerOriginX.value;
+        let newY = offsetY ? Number((dragCornerOriginY.value + offsetY).toFixed(10)) : dragCornerOriginY.value;
 
         // 按住 Shift：锁定到位移较大的主方向（水平或垂直）
         if (e.shiftKey) {
@@ -2062,15 +2009,15 @@ const handleMouseMove = (e) => {
             }
         }
 
-        // 更新拐点坐标
-        const updatedNodes = [...path.nodes];
-        updatedNodes[dragCornerIndex.value] = {x: newX, y: newY};
-
-        // 通知父组件更新路径
-        emit("update-component-position", {
-            id: dragPathId.value,
-            nodes: updatedNodes,
-        });
+        if (corner.x === newX && corner.y === newY) return;
+        const point = {x: newX, y: newY};
+        if (path.type === 'connectionLine') {
+            emit('update-component-position', {id: path.id, connectionCorner: {index, point}});
+        } else {
+            const nodes = [...path.nodes];
+            nodes[index] = point;
+            emit('update-component-position', {id: path.id, nodes});
+        }
 
         drawGrid();
         return;
@@ -2089,9 +2036,8 @@ const handleMouseMove = (e) => {
         return;
     }
 
-    // 连接线模式且已选中第一个控件：更新临时连接线终点
-    if (connectionLineMode.value && firstComponent.value) {
-        tempLineEnd.value = {x: pos.x, y: pos.y};
+    if (connectionLineMode.value && firstPort.value) {
+        tempLineEnd.value = findConnectionPort(pos)?.point ?? pos;
         drawGrid();
         return;
     }
@@ -2211,8 +2157,8 @@ const handleMouseUp = (e) => {
     // 结束拐点拖拽
     if (draggingCorner.value) {
         const path = props.placedComponents.find((c) => c.id === dragPathId.value);
-        if (path && dragCornerIndex.value !== null) {
-            const corner = path.nodes[dragCornerIndex.value];
+        const corner = getDraggablePathCorner(path, dragCornerIndex.value);
+        if (corner) {
             const originX = dragCornerOriginX.value;
             const originY = dragCornerOriginY.value;
 
@@ -2309,7 +2255,11 @@ const fitComponentsInView = (components, maxScale = 100, minExtent = 3) => {
     const ctx = canvas.value?.getContext("2d");
     if (ctx) ctx.font = LABEL_FONT;
     components.forEach((component) => {
-        if (component.type === "connectionLine") return;
+        if (component.type === "connectionLine") {
+            const route = getConnectionGeometry(component, props.placedComponents);
+            if (route) points.push(...route.nodes);
+            return;
+        }
         if (component.type === "AGVpath") {
             const bounds = getPathBounds(component);
             if (bounds) points.push({x: bounds.minX, y: bounds.minY}, {x: bounds.maxX, y: bounds.maxY});
@@ -2320,7 +2270,7 @@ const fitComponentsInView = (components, maxScale = 100, minExtent = 3) => {
             const halfHeight = (Math.abs(component.width * Math.sin(radians)) + Math.abs(component.height * Math.cos(radians))) / 2;
             points.push({x: center.x - halfWidth, y: center.y - halfHeight}, {x: center.x + halfWidth, y: center.y + halfHeight});
         } else {
-            const bounds = getComponentBounds(component);
+            const bounds = getComponentFootprint(component);
             points.push({x: bounds.x, y: bounds.y});
             points.push({x: bounds.x + bounds.width, y: bounds.y + bounds.height});
         }
@@ -2363,7 +2313,7 @@ const focusComponent = (id) => {
     if (!component) return;
     if (editingId.value) commitLabelEdit();
     const targets = component.type === "connectionLine"
-        ? props.placedComponents.filter((item) => item.id === component.fromId || item.id === component.toId)
+        ? [component, ...props.placedComponents.filter((item) => item.id === component.fromId || item.id === component.toId)]
         : [component];
     if (!fitComponentsInView(targets, MAX_PPM, 1)) return;
     showCursor.value = false;
@@ -2388,6 +2338,8 @@ watch(
             editingText.value = "";
         }
 
+        if (firstPort.value && !props.placedComponents.includes(firstPort.value.component)) clearConnectionDraft();
+
         if (canvas.value) {
             drawGrid();
         }
@@ -2406,15 +2358,8 @@ const handleCanvasKeyDown = (e) => {
     }
 
     if (connectionLineMode.value) {
-        if (firstComponent.value) {
-            firstComponent.value = null;
-            tempLineEnd.value = null;
-            emit("add-log", "连接线：已取消当前绘制");
-            drawGrid();
-        } else {
-            // 未选起点时直接退出连接线模式，回到"选择"
-            emit("placement-done");
-        }
+        if (firstPort.value) cancelConnectionDraft();
+        else emit("placement-done");
     }
 
     if (agvPathMode.value) {

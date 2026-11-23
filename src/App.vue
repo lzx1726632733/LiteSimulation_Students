@@ -1,11 +1,14 @@
 <script setup>
-import { ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import Background from './components/Background.vue'
 import TopBar from './components/TopBar.vue'
 import TopToolbar from './components/TopToolbar.vue'
 import ControlPanel from './components/ControlPanel.vue'
 import WorkspaceLayout from './components/WorkspaceLayout.vue'
 import BottomBar from './components/BottomBar.vue'
+import ShortcutSettings from './components/ShortcutSettings.vue'
+import { shortcutBindings } from './config/shortcuts.js'
+import { installShortcuts, loadShortcutBindings, saveShortcutBindings } from './utils/shortcuts.js'
 
 // 引用，获取组件实例对象
 const workspaceLayoutRef = ref(null)
@@ -24,9 +27,42 @@ const handlePlacementDone = () => {
   controlPanelRef.value?.resetToSelect()
 }
 
+const shortcutCommands = {
+  'repeat-last-tool': () => controlPanelRef.value?.repeatLastTool(),
+}
+const activeShortcutBindings = ref(shortcutBindings)
+const showShortcutSettings = ref(false)
+const shortcutSaveError = ref('')
+let uninstallShortcuts
+
+function registerShortcuts() {
+  uninstallShortcuts?.()
+  uninstallShortcuts = installShortcuts(window, activeShortcutBindings.value, shortcutCommands)
+}
+
+function saveShortcutSettings(bindings) {
+  try {
+    activeShortcutBindings.value = saveShortcutBindings(window, bindings, shortcutBindings)
+  } catch {
+    shortcutSaveError.value = '无法保存快捷键设置，请重试。'
+    return
+  }
+  registerShortcuts()
+  showShortcutSettings.value = false
+}
+
+onMounted(() => {
+  activeShortcutBindings.value = loadShortcutBindings(window, shortcutBindings)
+  registerShortcuts()
+})
+onBeforeUnmount(() => uninstallShortcuts?.())
+
 // 顶栏菜单动作派发
 const handleMenuAction = (id) => {
-  // TODO: 其余 id（new-model、open-model、save 等）后续在此扩展
+  if (id === 'shortcut-settings') {
+    shortcutSaveError.value = ''
+    showShortcutSettings.value = true
+  }
 }
 </script>
 
@@ -38,6 +74,8 @@ const handleMenuAction = (id) => {
         <WorkspaceLayout ref="workspaceLayoutRef" @placement-done="handlePlacementDone"
                          @simulation-status-change="simulationStatus = $event"></WorkspaceLayout>
         <BottomBar :simulation-status="simulationStatus"></BottomBar>
+        <ShortcutSettings v-if="showShortcutSettings" :bindings="activeShortcutBindings" :save-error="shortcutSaveError"
+                          @close="showShortcutSettings = false" @save="saveShortcutSettings"/>
     </Background>
 </template>
 

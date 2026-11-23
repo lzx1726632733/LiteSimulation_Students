@@ -15,8 +15,10 @@
                 class="menu-entry"
             >
                 <button
+                    type="button"
                     class="menu-btn"
                     :class="{ active: openMenuId === menu.id }"
+                    :aria-expanded="openMenuId === menu.id"
                     @click="toggleMenu(menu.id)"
                     @mouseenter="handleMenuHover(menu.id)"
                 >
@@ -27,12 +29,10 @@
                 <ul v-if="openMenuId === menu.id" class="menu-dropdown">
                     <template v-for="item in menu.items" :key="item.id">
                         <li v-if="item.dividerBefore" class="menu-divider"/>
-                        <li
-                            class="menu-item"
-                            :class="{ disabled: item.disabled }"
-                            @click="handleMenuAction(item)"
-                        >
-                            {{ item.label }}
+                        <li>
+                            <button type="button" class="menu-item" :disabled="item.disabled" @click="handleMenuAction(item)">
+                                {{ item.label }}
+                            </button>
                         </li>
                     </template>
                 </ul>
@@ -127,6 +127,7 @@ const handleKeyDown = (e) => {
 // 菜单项点击处理：disabled 项直接忽略，其余项向父组件冒泡 action id
 const handleMenuAction = (item) => {
     if (item.disabled) return
+    menuBar.value?.querySelector('.menu-btn.active')?.focus()
     closeMenu()
     emit('menu-action', item.id)
 }
@@ -252,7 +253,13 @@ onUnmounted(() => {
 
 /* 菜单项 */
 .menu-item {
+    display: block;
+    width: 100%;
     padding: 7px 16px;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    color: #1f2937;
     font-size: 13px;
     /* 必须写成整数：line-height: normal 在雅黑 13px 下约为 17.4px，菜单项高度
        就成了小数，逐项累加后两条分割线会落在不同的小数位置上，1px 的线被
@@ -271,12 +278,12 @@ onUnmounted(() => {
     color: #2566fd;
 }
 
-.menu-item.disabled {
+.menu-item:disabled {
     color: #9ca3af;
     cursor: default;
 }
 
-.menu-item.disabled:hover {
+.menu-item:disabled:hover {
     background-color: transparent;
     color: #9ca3af;
 }

@@ -11,34 +11,56 @@ const source = fs.readFileSync(filename, 'utf8');
 const { descriptor } = parse(source, { filename });
 const agvGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/agvPath.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getCornerMaxRadius, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds })');
+).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getCornerMaxRadius, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds, getPathCorner, buildPathArc, getPathGeometryBounds, distanceToPathSegment })');
 const stations = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/stations.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ STATION_TYPES, DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter })');
+).replace(/export const /g, 'const ') + '\n;({ STATION_TYPES, DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns })');
 const componentAppearance = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/componentAppearance.js'), 'utf8',
 ).replace(/export const /g, 'const ') + '\n;({ RESIZABLE_COMPONENT_TYPES, DEFAULT_COMPONENT_SHADOW_COLORS, DEFAULT_COMPONENT_SIZES, getDefaultShadowColor })');
+const componentPorts = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/componentPorts.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') +
+  '\n;({getComponentPorts,getComponentPortOffset,getComponentPortPosition,isValidComponentPortOffset,setComponentPortOffset,getLocalComponentPorts,fitComponentPorts})',
+{...stations, ...componentAppearance});
 const alignBounds = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/alignment.js'), 'utf8',
 ).replace('export const alignBounds', 'const alignBounds') + '\n;alignBounds');
 const inputRules = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/inputRules.js'), 'utf8',
 ).replace(/export (const|function) /g, '$1 ') +
-  '\n;({INPUT_PROPERTY_DEFAULTS,isValidInputProperty,parseGenerationInterval,formatGenerationInterval,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
+  '\n;({INPUT_ENTITY_TYPES,getInputType,getInputRuleCategory,INPUT_PROPERTY_DEFAULTS,isValidInputProperty,parseGenerationInterval,formatGenerationInterval,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
+const workstationProperties = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/workstationProperties.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({WORKSTATION_PROPERTY_DEFAULTS,PARALLEL_WORKSTATION_PROPERTY_DEFAULTS,isValidWorkstationProperty,isValidParallelWorkstationProperty,ensureParallelWorkstationEquipment})');
+const assemblyRecipes = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/assemblyRecipes.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({ASSEMBLY_MODES,CONTAINER_TYPES,ASSEMBLY_TIME_TOLERANCE_MS,getAssemblyUnitCount,isValidAssemblyUnitCount,getAssemblyRecipeError,getAssemblyPackingType,findAssemblyBatch})');
+const disassemblyRecipes = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/disassemblyRecipes.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({DISASSEMBLY_MODES,getDisassemblyUnitCount,isValidDisassemblyUnitCount,getDisassemblyRecipeError,findDisassemblyRecipe})');
+const bufferProperties = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/bufferProperties.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') + '\n;({BUFFER_PROPERTY_DEFAULTS,isValidBufferProperty,getBufferProperty})');
 const createInputSimulation = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/inputSimulation.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace('export function ', 'function ') + '\n;createInputSimulation', {
-  ...inputRules, ...componentAppearance, getComponentLabel: item => `${item.name}${item.index}`,
-  getConnectionGeometry: (...args) => connectionGeometry.getConnectionGeometry(...args), DEFAULT_WORKPIECE_SPEED: 1,
+  ...inputRules, ...workstationProperties, ...assemblyRecipes, ...disassemblyRecipes, ...bufferProperties,
+  ...componentAppearance, ...stations, getComponentLabel: item => `${item.name}${item.index}`,
+  getConnectionGeometry: (...args) => connectionGeometry.getConnectionGeometry(...args),
+  getPointOnConnection: (...args) => connectionGeometry.getPointOnConnection(...args), DEFAULT_WORKPIECE_SPEED: 1,
 });
 const connectionGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/connectionLine.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export (const|function) /g, '$1 ') +
-  '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry})', stations);
+  '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry,getPointOnConnection,getConnectionSegmentMove})', {...stations, ...componentPorts, ...agvGeometry});
 
 // Run the actual component handlers with Vue reactivity and a small DOM/canvas stub.
 // No test-only exports or alternate coordinate implementation are added to production.
-function createCanvas(items = []) {
+function createCanvas(items = [], onPlacementDone) {
   const mounted = [];
   const cleanup = [];
   const frames = new Map();
@@ -60,6 +82,7 @@ function createCanvas(items = []) {
   const emit = (type, value) => {
     events.push({ type, value });
     if (type === 'component-placed') props.placedComponents.push(value);
+    if (type === 'placement-done') onPlacementDone?.();
     if (type === 'select-component') {
       props.selectedId = value;
       props.selectedIds = value ? [value] : [];
@@ -69,7 +92,14 @@ function createCanvas(items = []) {
       props.selectedId = value[0] ?? null;
     }
     if (type === 'update-component-position') {
-      Object.assign(props.placedComponents.find((item) => item.id === value.id), value);
+      const target = props.placedComponents.find(item => item.id === value.id);
+      if (value.connectionCorner) {
+        const {index, point} = value.connectionCorner;
+        target.waypoints[index] = point;
+        if (target.cornerRadii) target.cornerRadii[index] = 0;
+      } else {
+        Object.assign(target, value);
+      }
     }
     if (type === 'update-component-positions') {
       value.forEach((position) => Object.assign(props.placedComponents.find((item) => item.id === position.id), position));
@@ -80,6 +110,8 @@ function createCanvas(items = []) {
     ...agvGeometry,
     ...stations,
     ...componentAppearance,
+    ...componentPorts,
+    ...connectionGeometry,
     alignBounds,
     ...vue, document, defineProps: () => props, defineEmits: () => emit, defineExpose() {},
     onMounted: (callback) => mounted.push(callback),
@@ -105,10 +137,14 @@ function createCanvas(items = []) {
     handleMouseDown, handleMouseMove, handleMouseUp, handleMouseEnter, handleMouseLeave,
     handleCanvasKeyDown, handlePointerCancel, handleWindowBlur, getCanvasMousePosition,
     drawGridNow, drawWorkpieces, hitTestWorkpiece, workpieceTooltipAnchor, dragging, draggingCorner, editingId, labelRects, labelEditorStyle,
-    hitTestComponent, hitTestLabel, resolveLineEndpoints, hitTestConnectionLine, hitTestAGVPath,
+    hitTestComponent, hitTestLabel, connectionScreenPoint, hitTestConnectionLine, hitTestAGVPath,
   })`;
   const scope = vue.effectScope();
   const api = scope.run(() => vm.runInNewContext(`${script}\n${exports}`, sandbox, { filename }));
+  api.resolveLineEndpoints = line => {
+    const {start, end} = connectionGeometry.getConnectionGeometry(line, props.placedComponents);
+    return {start: api.connectionScreenPoint(start), end: api.connectionScreenPoint(end)};
+  };
   api.canvas.value = element;
   api.canvasContainer.value = container;
   mounted.forEach((callback) => callback());
@@ -126,6 +162,8 @@ function createCanvas(items = []) {
 const buffer = (overrides = {}) => ({
   id: 'component-1', type: 'buffer', name: '缓冲区', icon: 'buffer.svg', index: 1,
   x: 10, y: 10, width: 3, height: 3, ...overrides,
+  loadPoint: overrides.loadPoint ?? {x: 0, y: 0},
+  unloadPoint: overrides.unloadPoint ?? {x: 0, y: 0},
 });
 const near = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-8, `${actual} != ${expected}`);
 
@@ -397,14 +435,71 @@ test('ordinary connection lines reject stations at both endpoints and still conn
   c.props.activeControl = { type: 'connectionLine', name: '连接线', icon: 'connection.svg' };
   await vue.nextTick();
   await c.api.handleMouseDown(c.pointer(0, 0));
-  await c.api.handleMouseDown(c.pointer(10, 0));
+  await c.api.handleMouseDown(c.pointer(10.5, 0));
   await c.api.handleMouseDown(c.pointer(1, 0));
   assert.equal(c.props.placedComponents.some((item) => item.type === 'connectionLine'), false);
-  await c.api.handleMouseDown(c.pointer(19, 0));
+  await c.api.handleMouseDown(c.pointer(19.5, 0));
   const line = c.props.placedComponents.find((item) => item.type === 'connectionLine');
   assert.ok(line);
   assert.equal(line.fromId, 'machine-a'); assert.equal(line.toId, 'machine-b');
   assert.ok(c.events.some((event) => event.type === 'add-log' && event.value.includes('不能连接站点')));
+});
+
+test('ordinary connections require a port to finish, can cancel over the port and support reverse drawing', async (t) => {
+  const source = {id: 'source', type: 'systemInput', x: -3, y: -1.5, width: 3, height: 3};
+  const sink = {id: 'sink', type: 'systemOutput', x: 12, y: -1.5, width: 3, height: 3};
+  const c = createCanvas([source, sink]);
+  t.after(() => c.dispose());
+  c.props.activeControl = {type: 'connectionLine', name: '连接线'};
+  await vue.nextTick();
+  const click = (x, y, button = 0) => c.api.handleMouseDown(c.pointer(x, y, {button}));
+  const links = () => c.props.placedComponents.filter(item => item.type === 'connectionLine');
+  await click(0, 0);
+  await click(3, 4);
+  await click(13.5, 0); // 点在组件内但没有点中端口。
+  assert.equal(links().length, 0);
+  await click(12, 0, 2);
+  assert.equal(links().length, 0);
+  assert.ok(c.events.some(event => event.type === 'add-log' && event.value.includes('已取消当前绘制')));
+  await click(12, 0);
+  await click(9, 5);
+  await click(4, 3);
+  await click(0, 0);
+  assert.equal(links().length, 1);
+  const [line] = links();
+  assert.deepEqual([line.fromId, line.toId], ['source', 'sink']);
+  assert.deepEqual(Array.from(line.waypoints, point => [point.x, point.y]), [[4, 3], [9, 5]]);
+});
+
+test('dragging an ordinary arc selects the line and resets its radius without moving the ports', async (t) => {
+  const from = buffer({id: 'from', x: -1.5, y: -1.5});
+  const to = buffer({id: 'to', x: 8.5, y: 8.5});
+  const line = {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to', waypoints: [{x: 10, y: 0}], cornerRadii: [5]};
+  const c = createCanvas([from, to, line]);
+  t.after(() => c.dispose());
+  const geometry = connectionGeometry.getConnectionGeometry(line, c.props.placedComponents);
+  const arc = geometry.segments.find(segment => segment.type === 'arc');
+  const mid = agvGeometry.pointOnPathSegment(arc, 0.5);
+  assert.equal(c.api.hitTestConnectionLine(line, mid.x, mid.y), true);
+  assert.equal(c.api.hitTestConnectionLine(line, 10, 0), false);
+  const ctx = c.element.getContext();
+  const rectangles = [];
+  ctx.strokeRect = (...bounds) => rectangles.push(bounds);
+  c.props.selectedId = line.id;
+  c.props.selectedIds = [line.id];
+  c.api.drawGridNow();
+  assert.ok(rectangles.some(([x, y, w, h]) => x + w / 2 === 10 * c.api.ppm.value && y + h / 2 === 0 && w === 8 && h === 8));
+  c.props.selectedId = null;
+  c.props.selectedIds = [];
+  await c.api.handleMouseDown(c.pointer(mid.x, mid.y));
+  assert.equal(c.props.selectedId, line.id);
+  c.api.handleMouseMove(c.pointer(mid.x + 1, mid.y + 2));
+  c.api.handleMouseUp();
+  assert.deepEqual({...line.waypoints[0]}, {x: 11, y: 2});
+  assert.equal(line.cornerRadii[0], 0);
+  const updated = connectionGeometry.getConnectionGeometry(line, c.props.placedComponents);
+  assert.deepEqual({...updated.start}, {...geometry.start});
+  assert.deepEqual({...updated.end}, {...geometry.end});
 });
 
 test('station placement numbers each subtype independently and reuses gaps without reusing IDs', async (t) => {
@@ -1057,13 +1152,671 @@ function loadComponent(name, bindings, exposed) {
     ...agvGeometry,
     ...stations,
     ...componentAppearance,
-    ...inputRules, ...connectionGeometry, createInputSimulation, createBootstrapTooltipDirective: () => ({}),
+    ...componentPorts,
+    ...inputRules, ...workstationProperties, ...assemblyRecipes, ...disassemblyRecipes, ...bufferProperties, ...connectionGeometry,
+    createInputSimulation, createBootstrapTooltipDirective: () => ({}),
     ...vue, onMounted() {}, onUnmounted() {}, onBeforeUnmount() {}, defineExpose() {},
     defineEmits: () => () => {}, ...bindings,
   });
 }
 
-test('connection length uses component centers and is unchanged by resizing around those centers', () => {
+test('rotation buttons turn the icon and footprint about the same center without moving its links', (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties, handleUpdateComponentPosition');
+  workspace.placedComponents.value.push(
+    buffer({id: 'rotated', x: -3, y: -1, width: 6, height: 2}),
+    buffer({id: 'other', x: 9, y: -1, width: 2, height: 2}),
+    {id: 'line', type: 'connectionLine', fromId: 'rotated', toId: 'other'},
+    {id: 'station', type: 'node', x: 2, y: 10, width: 6, height: 2},
+  );
+  const [item, , line, station] = workspace.placedComponents.value;
+  const props = vue.reactive({selectedItem: item});
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => props,
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'rotateSelectedComponent, widthInMeters, heightInMeters, handleDimensionChange');
+  const canvas = createCanvas(workspace.placedComponents.value);
+  t.after(() => canvas.dispose());
+  const centerBefore = stations.getComponentCenter(item);
+  const lineLength = connectionGeometry.getConnectionGeometry(line, workspace.placedComponents.value).length;
+  const endpoints = canvas.api.resolveLineEndpoints(line);
+  assert.equal(canvas.api.hitTestComponent(2, 0).id, item.id);
+
+  panel.rotateSelectedComponent(1);
+  assert.equal(item.quarterTurns, 1);
+  assert.deepEqual(stations.getComponentCenter(item), centerBefore);
+  assert.deepEqual(canvas.api.resolveLineEndpoints(line), endpoints);
+  assert.deepEqual([panel.widthInMeters.value, panel.heightInMeters.value], [2, 6]);
+  assert.equal(canvas.api.hitTestComponent(0, 2).id, item.id);
+  assert.equal(canvas.api.hitTestComponent(2, 0).id, line.id);
+  const rotations = [];
+  const ctx = canvas.element.getContext();
+  ctx.rotate = angle => rotations.push(angle);
+  canvas.api.drawGridNow();
+  assert.ok(rotations.includes(Math.PI / 2));
+  const label = canvas.api.labelRects.get(item.id);
+  near(label.x + label.width / 2, centerBefore.x);
+  assert.ok(label.y + label.height < -3);
+
+  panel.handleDimensionChange('width', {target: {value: '4'}});
+  assert.deepEqual([panel.widthInMeters.value, panel.heightInMeters.value, item.width, item.height], [4, 6, 6, 4]);
+  assert.deepEqual(stations.getComponentCenter(item), centerBefore);
+  assert.equal(connectionGeometry.getConnectionGeometry(line, workspace.placedComponents.value).length, lineLength);
+  panel.rotateSelectedComponent(-1);
+  assert.deepEqual([item.quarterTurns, panel.widthInMeters.value, panel.heightInMeters.value], [0, 6, 4]);
+
+  props.selectedItem = station;
+  panel.rotateSelectedComponent(-1);
+  assert.deepEqual([station.x, station.y, station.quarterTurns], [2, 10, 3]);
+  assert.equal(canvas.api.hitTestComponent(2, 12).id, station.id);
+  assert.equal(canvas.api.hitTestComponent(4, 10), null);
+  props.selectedItem = line;
+  panel.rotateSelectedComponent(1);
+  assert.equal(line.quarterTurns, undefined);
+});
+
+function loadExports(file, fields) {
+  return vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../src', file), 'utf8')
+    .replace(/export (const|function) /g, '$1 ') + `\n;({${fields}})`);
+}
+
+const shortcuts = {
+  ...loadExports('config/shortcuts.js', 'shortcutBindings,shortcutLabels'),
+  ...loadExports('utils/shortcuts.js', 'installShortcuts,loadShortcutBindings,saveShortcutBindings,formatShortcutBinding,normalizeShortcutBinding'),
+};
+
+test('the back mouse button restores a finished tool and leaves an active drawing alone', async (t) => {
+  const {tabList, menuControls} = loadExports('config/controlMenuData.js', 'tabList,menuControls');
+  const target = Object.assign(new EventTarget(), {document: {activeElement: null}});
+  let mount;
+  let unmount;
+  const app = loadComponent('../App', {
+    ...shortcuts, window: target,
+    onMounted: callback => { mount = callback; },
+    onBeforeUnmount: callback => { unmount = callback; },
+  }, 'workspaceLayoutRef, controlPanelRef, handleControlChange, handlePlacementDone');
+  const canvas = createCanvas([
+    buffer({id: 'a', x: 3, y: -1}),
+    buffer({id: 'b', x: 9, y: -1}),
+    buffer({id: 'c', x: 15, y: -1}),
+  ], app.handlePlacementDone);
+  t.after(() => canvas.dispose());
+  app.workspaceLayoutRef.value = {handleControlChange: control => { canvas.props.activeControl = control; }};
+  const panel = loadComponent('ControlPanel', {
+    tabList, menuControls,
+    defineEmits: () => (_, control) => app.handleControlChange(control),
+  }, 'handleClickControl, handleTabClick, resetToSelect, repeatLastTool, activeKey, activeControlInfo');
+  app.controlPanelRef.value = panel;
+  mount();
+
+  const mouse = (type, button = 3, buttons = type === 'mousedown' ? 8 : 0) => {
+    const event = Object.assign(new Event(type, {cancelable: true}), {button, buttons});
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  const click = async (x) => {
+    const event = canvas.pointer(x, 0);
+    await canvas.api.handleMouseDown(event);
+    canvas.api.handleMouseUp(event);
+  };
+  assert.equal(mouse('mousedown'), true);
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+  panel.handleClickControl(menuControls.commonControl.find(item => item.type === 'connectionLine'));
+  await vue.nextTick();
+  await click(4.5);
+  assert.equal(mouse('mousedown'), true);
+  await click(10.5);
+  await vue.nextTick();
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+  assert.ok(canvas.props.placedComponents.some(item => item.type === 'connectionLine' && item.fromId === 'a' && item.toId === 'b'));
+  canvas.props.selectedId = 'b';
+  assert.equal(mouse('mouseup'), true);
+  assert.equal(mouse('auxclick'), true);
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+  assert.equal(mouse('mousedown', 4, 16), false);
+  assert.equal(mouse('mousedown', 3, 9), true);
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+  target.document.activeElement = {closest: () => true};
+  mouse('mousedown');
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+  target.document.activeElement = null;
+  mouse('mousedown');
+  await vue.nextTick();
+  assert.equal(panel.activeControlInfo.value.type, 'connectionLine');
+  await click(10.5);
+  await click(16.5);
+  assert.ok(canvas.props.placedComponents.some(item => item.type === 'connectionLine' && item.fromId === 'b' && item.toId === 'c'));
+
+  panel.handleTabClick(tabList.find(tab => tab.id === 'logistics'));
+  panel.handleClickControl(menuControls.logistics.find(item => item.type === 'AGVpath'));
+  panel.handleTabClick(tabList[0]);
+  mouse('mousedown');
+  assert.equal(panel.activeKey.value, 'logistics');
+  assert.equal(panel.activeControlInfo.value.type, 'AGVpath');
+  panel.resetToSelect();
+  unmount();
+  assert.equal(mouse('mousedown'), false);
+  assert.equal(panel.activeControlInfo.value.type, 'select');
+});
+
+test('shortcut settings record a draft, rebind on save and load the preference at the next start', () => {
+  const stored = new Map();
+  const target = Object.assign(new EventTarget(), {
+    document: {activeElement: null},
+    localStorage: {getItem: key => stored.get(key) ?? null, setItem: (key, data) => stored.set(key, data)},
+  });
+  let executions = 0;
+  const createApp = () => {
+    let mount;
+    let unmount;
+    const app = loadComponent('../App', {
+      ...shortcuts, window: target,
+      onMounted: callback => { mount = callback; },
+      onBeforeUnmount: callback => { unmount = callback; },
+    }, 'controlPanelRef, activeShortcutBindings, showShortcutSettings, handleMenuAction, saveShortcutSettings');
+    app.controlPanelRef.value = {repeatLastTool: () => { executions++; }};
+    mount();
+    return {app, unmount};
+  };
+  const {app, unmount} = createApp();
+  const {topBarMenus} = loadExports('config/topBarMenuData.js', 'topBarMenus');
+  const menuItem = topBarMenus.find(menu => menu.id === 'start').items.find(item => item.label === '快捷键设置');
+  app.handleMenuAction(menuItem.id);
+  assert.equal(app.showShortcutSettings.value, true);
+  let emitted;
+  const settings = loadComponent('ShortcutSettings', {
+    ...shortcuts, defineProps: () => ({bindings: app.activeShortcutBindings.value}),
+    defineEmits: () => (event) => { emitted = event; },
+  }, 'draft, toggleRecording, recordKey, recordMouse, cancel, restoreDefaults');
+  const send = (type, fields) => {
+    const event = Object.assign(new Event(type, {cancelable: true}), fields);
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  const command = 'repeat-last-tool';
+  const back = {button: 3, buttons: 8};
+  const forward = {button: 4, buttons: 16};
+  settings.toggleRecording(command);
+  settings.recordMouse({...forward, preventDefault() {}});
+  assert.equal(settings.draft.value[command].button, 4);
+  assert.equal(app.activeShortcutBindings.value[command].button, 3);
+  settings.toggleRecording(command);
+  settings.recordKey({key: 'R', ctrlKey: true, shiftKey: true, preventDefault() {}});
+  assert.equal(shortcuts.formatShortcutBinding(settings.draft.value[command]), 'Ctrl + Shift + R');
+  target.document.activeElement = {closest: selector => selector.includes('dialog')};
+  send('mousedown', back);
+  assert.equal(executions, 0);
+  target.document.activeElement = null;
+  assert.equal(send('mousedown', back), true);
+  assert.equal(executions, 1);
+  app.saveShortcutSettings(settings.draft.value);
+  assert.equal(app.showShortcutSettings.value, false);
+  assert.equal(send('mousedown', back), false);
+  assert.equal(send('keydown', {key: 'R', ctrlKey: true}), false);
+  const combination = {key: 'R', ctrlKey: true, shiftKey: true};
+  assert.equal(send('keydown', combination), true);
+  assert.equal(send('keydown', {...combination, repeat: true}), true);
+  assert.equal(executions, 2);
+  unmount();
+
+  const restarted = createApp();
+  assert.equal(restarted.app.activeShortcutBindings.value[command].key, 'r');
+  send('keydown', combination);
+  assert.equal(executions, 3);
+  settings.toggleRecording(command);
+  settings.cancel();
+  assert.equal(emitted, undefined);
+  settings.restoreDefaults();
+  restarted.app.saveShortcutSettings(settings.draft.value);
+  assert.equal(send('keydown', combination), false);
+  assert.equal(send('mousedown', back), true);
+  assert.equal(executions, 4);
+  restarted.unmount();
+});
+
+test('input type is saved per input without changing its rule categories', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'input-1', type: 'systemInput'}));
+  workspace.handleComponentPlaced(buffer({id: 'input-2', type: 'systemInput'}));
+  const [first, second] = workspace.placedComponents.value;
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: first}),
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'inputProperties, handleInputPropertyChange');
+  assert.equal(panel.inputProperties.value.inputType, 'Workpiece');
+  panel.handleInputPropertyChange('inputType', {target: {value: 'Vehicle'}});
+  assert.equal(first.inputType, 'Vehicle');
+  assert.equal(second.inputType, 'Workpiece');
+  assert.equal(first.inputRuleRows[0].partType, 'Workpiece');
+  workspace.handleUpdateComponentProperties({id: first.id, inputType: 'AGV'});
+  assert.equal(first.inputType, 'Vehicle');
+});
+
+test('buffer panel stores positive or unlimited capacity and a fixed duration in seconds', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer());
+  const item = workspace.placedComponents.value[0];
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: item}),
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'bufferCapacity, minimumStayTime, handleBufferPropertyChange');
+  assert.equal(panel.bufferCapacity.value, -1);
+  assert.equal(panel.minimumStayTime.value, 0);
+  panel.handleBufferPropertyChange('bufferCapacity', {target: {value: '2'}});
+  for (const value of ['0', '-2', '2.5', '']) {
+    const invalid = {target: {value}};
+    panel.handleBufferPropertyChange('bufferCapacity', invalid);
+    assert.equal(invalid.target.value, '2');
+  }
+  const stay = {target: {value: '1:00.250'}};
+  panel.handleBufferPropertyChange('minimumStayTime', stay);
+  assert.equal(item.bufferCapacity, 2);
+  assert.equal(item.minimumStayTime, 60.25);
+  assert.equal(stay.target.value, '1:0.25');
+});
+
+test('assembly panel adds and edits validated BOM drafts through the shared dialog', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, activeDialog, dialogItem, openDialog, saveDialog, handleComponentPlaced, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'assembly', type: 'assemblyWorkstation'}));
+  const station = workspace.placedComponents.value[0];
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: station}),
+    defineEmits: () => (event, payload) => {
+      if (event === 'open-dialog') workspace.openDialog(payload);
+      else workspace.handleUpdateComponentProperties(payload);
+    },
+  }, 'assemblyRecipes, assemblyUnitCount, handleAssemblyUnitCountChange, selectAssemblyRow, selectAssemblyMode, openAssemblyRecipe, deleteAssemblyRecipe');
+  assert.equal(station.assemblyMode, 'parts');
+  assert.equal(panel.assemblyUnitCount.value, 1);
+  panel.handleAssemblyUnitCountChange({target: {value: '3'}});
+  assert.equal(station.assemblyUnitCount, 3);
+  const invalidCount = {target: {value: '1.5'}};
+  panel.handleAssemblyUnitCountChange(invalidCount);
+  assert.equal(invalidCount.target.value, '3');
+  workspace.handleUpdateComponentProperties({id: station.id, assemblyUnitCount: 0});
+  assert.equal(station.assemblyUnitCount, 3);
+  assert.equal(panel.assemblyRecipes.value.length, 0);
+  const createEditor = () => {
+    const active = workspace.activeDialog.value;
+    return loadComponent('Dialog', {
+      defineProps: () => ({item: workspace.dialogItem.value, dialogType: active.dialogType,
+        assemblyRecipe: active.recipe, assemblyMode: active.mode, assemblyPackingType: active.packingType}),
+      defineEmits: () => (event, payload) => {
+        if (event === 'save') workspace.saveDialog(payload);
+        if (event === 'close') workspace.activeDialog.value = null;
+      },
+      window: {innerWidth: 1280, innerHeight: 800}, systemInputIcon: '',
+    }, 'recipeDraft, bomError, addMaterialRow, saveBomRecipe, formatBomDuration, emit');
+  };
+  panel.openAssemblyRecipe(null);
+  const create = createEditor();
+  assert.equal(create.recipeDraft.assemblyTime, '5:0');
+  assert.equal(create.recipeDraft.setupTime, '0:0');
+  assert.equal(create.recipeDraft.fillColor, '#000000');
+  assert.equal(create.recipeDraft.packingType, 'Workpiece');
+  create.recipeDraft.productType = ' Assembly ';
+  create.addMaterialRow();
+  create.recipeDraft.materials[0].partType = ' Bolt ';
+  create.saveBomRecipe();
+  assert.match(create.bomError.value, /工件数量/);
+  assert.equal(station.assemblyRecipes.length, 0);
+  create.recipeDraft.materials[0].quantity = 2;
+  assert.equal(create.bomError.value, '');
+  create.saveBomRecipe();
+  assert.equal(station.assemblyRecipes[0].materials[0].partType, 'Bolt');
+  assert.equal(station.assemblyRecipes[0].materials[0].name, '');
+  assert.equal(station.assemblyRecipes[0].assemblyTime, 300);
+  assert.equal(station.assemblyRecipes[0].packingType, 'Workpiece');
+
+  panel.selectAssemblyMode('container');
+  panel.openAssemblyRecipe(null);
+  assert.equal(createEditor().recipeDraft.packingType, 'Pallet');
+  panel.selectAssemblyRow(0);
+  panel.openAssemblyRecipe(0);
+  assert.equal(createEditor().recipeDraft.packingType, 'Workpiece', 'a change made without a selection only affects new recipes');
+
+  panel.selectAssemblyMode('container');
+  panel.openAssemblyRecipe(0);
+  const edit = createEditor();
+  assert.equal(edit.recipeDraft.packingType, 'Pallet');
+  edit.recipeDraft.packingType = 'AGV';
+  edit.recipeDraft.assemblyTime = '30';
+  edit.formatBomDuration('assemblyTime');
+  assert.equal(edit.recipeDraft.assemblyTime, '0:30');
+  edit.recipeDraft.setupTime = '1.005';
+  edit.formatBomDuration('setupTime');
+  assert.equal(edit.recipeDraft.setupTime, '0:1.005');
+  edit.recipeDraft.setupTime = '1:90';
+  edit.formatBomDuration('setupTime');
+  assert.equal(edit.recipeDraft.setupTime, '1:90');
+  assert.match(edit.bomError.value, /准备时长/);
+  edit.recipeDraft.setupTime = '0:1.005';
+  edit.recipeDraft.materials[0].quantity = 3;
+  assert.equal(station.assemblyRecipes[0].materials[0].quantity, 2);
+  assert.equal(station.assemblyRecipes[0].packingType, 'Workpiece');
+  edit.saveBomRecipe();
+  assert.equal(station.assemblyRecipes.length, 1);
+  assert.equal(station.assemblyRecipes[0].packingType, 'AGV');
+  assert.equal(station.assemblyRecipes[0].assemblyTime, 30);
+  assert.equal(station.assemblyRecipes[0].setupTime, 1.005);
+  assert.equal(station.assemblyRecipes[0].materials[0].quantity, 3);
+
+  panel.openAssemblyRecipe(0);
+  assert.equal(createEditor().recipeDraft.packingType, 'AGV');
+  panel.selectAssemblyMode('parts');
+  panel.openAssemblyRecipe(0);
+  const cancelled = createEditor();
+  assert.equal(cancelled.recipeDraft.packingType, 'Workpiece');
+  cancelled.emit('close');
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(station.assemblyRecipes[0].packingType, 'AGV');
+  panel.selectAssemblyMode('container');
+  panel.openAssemblyRecipe(0);
+  const switchedBack = createEditor();
+  assert.equal(switchedBack.recipeDraft.packingType, 'Pallet', 'explicitly selecting a mode defaults to its first option');
+  switchedBack.emit('close');
+  assert.equal(station.assemblyRecipes[0].packingType, 'AGV');
+
+  // 先切换站点模式，再选已有的 AGV 行，未为此行设置专门的模式。
+  panel.selectAssemblyRow(0);
+  panel.selectAssemblyMode('parts');
+  panel.selectAssemblyRow(0);
+  panel.openAssemblyRecipe(0);
+  const fixedType = createEditor();
+  assert.equal(workspace.activeDialog.value.mode, 'parts');
+  assert.equal(fixedType.recipeDraft.packingType, 'Workpiece');
+  assert.equal(station.assemblyRecipes[0].packingType, 'AGV');
+  fixedType.saveBomRecipe();
+  assert.equal(station.assemblyRecipes[0].packingType, 'Workpiece');
+
+  panel.deleteAssemblyRecipe();
+  assert.equal(station.assemblyRecipes.length, 0);
+});
+
+test('changing assembly mode preserves the visible type of legacy recipes', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
+  for (const [id, previous, next, expected] of [
+    ['old-container', 'container', 'parts', 'AGV'],
+    ['old-part', 'parts', 'container', 'Workpiece'],
+  ]) {
+    workspace.handleComponentPlaced(buffer({id, type: 'assemblyWorkstation', assemblyMode: previous,
+      assemblyRecipes: [{containerType: 'AGV'}]}));
+    workspace.handleUpdateComponentProperties({id, assemblyMode: next});
+    const station = workspace.placedComponents.value.find(item => item.id === id);
+    assert.equal(station.assemblyRecipes[0].packingType, expected);
+  }
+});
+
+test('disassembly station saves its own unit count, mode and selectable BOM rows', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, activeDialog, dialogItem, openDialog, saveDialog, handleComponentPlaced, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'split', type: 'disassemblyWorkstation'}));
+  const station = workspace.placedComponents.value[0];
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: station}),
+    defineEmits: () => (event, payload) => {
+      if (event === 'open-dialog') workspace.openDialog(payload);
+      else workspace.handleUpdateComponentProperties(payload);
+    },
+  }, 'disassemblyUnitCount, handleDisassemblyUnitCountChange, selectDisassemblyRow, openDisassemblyRecipe, deleteDisassemblyRecipe');
+  assert.equal(panel.disassemblyUnitCount.value, 1);
+  assert.equal(station.disassemblyMode, 'parts');
+  assert.equal(station.disassemblyRecipes.length, 0);
+  panel.handleDisassemblyUnitCountChange({target: {value: '3'}});
+  const invalid = {target: {value: '1.5'}};
+  panel.handleDisassemblyUnitCountChange(invalid);
+  assert.equal(invalid.target.value, '3');
+  assert.equal(station.disassemblyUnitCount, 3);
+
+  const createEditor = () => {
+    const active = workspace.activeDialog.value;
+    return loadComponent('Dialog', {
+      defineProps: () => ({item: workspace.dialogItem.value, dialogType: active.dialogType,
+        disassemblyRecipe: active.recipe, disassemblyMode: active.mode}),
+      defineEmits: () => (event, payload) => {
+        if (event === 'save') workspace.saveDialog(payload);
+        else if (event === 'close') workspace.activeDialog.value = null;
+      },
+      window: {innerWidth: 1280, innerHeight: 800}, systemInputIcon: '',
+    }, 'recipeDraft, bomObjectLabel, bomError, addMaterialRow, deleteMaterialRow, saveBomRecipe, formatBomDuration, emit');
+  };
+  panel.openDisassemblyRecipe(null);
+  const editor = createEditor();
+  assert.equal(editor.bomObjectLabel.value, '部件');
+  assert.equal(editor.recipeDraft.disassemblyTime, '5:0');
+  assert.equal(editor.recipeDraft.setupTime, '0:0');
+  editor.recipeDraft.productType = ' Kit ';
+  editor.recipeDraft.name = ' 组合件 ';
+  assert.match(editor.bomError.value, /至少编辑一行拆卸零件/);
+  editor.saveBomRecipe();
+  assert.equal(station.disassemblyRecipes.length, 0);
+  editor.recipeDraft.disassemblyTime = '30';
+  editor.formatBomDuration('disassemblyTime');
+  assert.equal(editor.recipeDraft.disassemblyTime, '0:30');
+  editor.addMaterialRow();
+  const material = editor.recipeDraft.materials[0];
+  assert.equal(material.fillColor, '#000000');
+  material.partType = ' Bolt ';
+  editor.saveBomRecipe();
+  assert.match(editor.bomError.value, /零件数量/);
+  assert.equal(station.disassemblyRecipes.length, 0);
+  Object.assign(material, {quantity: 2, fillColor: '#123456'});
+  editor.saveBomRecipe();
+  assert.equal(station.disassemblyRecipes[0].productType, 'Kit');
+  assert.equal(station.disassemblyRecipes[0].name, '组合件');
+  assert.equal(station.disassemblyRecipes[0].disassemblyTime, 30);
+  const savedMaterial = station.disassemblyRecipes[0].materials[0];
+  assert.deepEqual({...savedMaterial}, {partType: 'Bolt', quantity: 2, name: '', fillColor: '#123456'});
+
+  workspace.handleUpdateComponentProperties({id: 'split', disassemblyMode: 'container'});
+  panel.selectDisassemblyRow(0);
+  panel.openDisassemblyRecipe(0);
+  const cancelled = createEditor();
+  assert.equal(cancelled.bomObjectLabel.value, '容器');
+  cancelled.recipeDraft.materials[0].fillColor = '#ff0000';
+  cancelled.emit('close');
+  assert.equal(station.disassemblyRecipes[0].materials[0].fillColor, '#123456');
+  panel.openDisassemblyRecipe(0);
+  const edit = createEditor();
+  edit.addMaterialRow();
+  edit.deleteMaterialRow();
+  edit.recipeDraft.materials.pop();
+  assert.equal(edit.bomError.value, '', 'a container rule may unload all parts with an empty list');
+  edit.saveBomRecipe();
+  assert.equal(station.disassemblyRecipes.length, 1);
+  assert.equal(station.disassemblyRecipes[0].materials.length, 0);
+  panel.deleteDisassemblyRecipe();
+  assert.equal(station.disassemblyRecipes.length, 0);
+});
+
+test('workstations initialize fixed durations and preserve supplied values', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced');
+  workspace.handleComponentPlaced(buffer({id: 'machine-1', type: 'workstation'}));
+  workspace.handleComponentPlaced(buffer({id: 'machine-2', type: 'workstation', processingTime: 0, setupTime: 1.005}));
+  const [first, second] = workspace.placedComponents.value;
+  assert.equal(first.processingTime, 60);
+  assert.equal(first.setupTime, 0);
+  assert.equal(second.processingTime, 0);
+  assert.equal(second.setupTime, 1.005);
+});
+
+test('parallel workstation properties initialize defaults, validate edits and preserve unique equipment IDs', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'parallel-1', type: 'parallelWorkstation'}));
+  workspace.handleComponentPlaced(buffer({id: 'parallel-2', type: 'parallelWorkstation', equipmentCount: 4}));
+  const [first, second] = workspace.placedComponents.value;
+  assert.equal(first.equipmentCount, 1);
+  assert.equal(first.processingTime, 60);
+  assert.equal(first.setupTime, 0);
+  const originalId = first.equipmentIds[0];
+  const props = vue.reactive({selectedItem: first});
+  let updates = 0;
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => props,
+    defineEmits: () => (event, value) => { updates++; workspace.handleUpdateComponentProperties(value); },
+  }, 'parallelWorkstationProperties, handleEquipmentCountChange, handleWorkstationTimeChange');
+  panel.handleEquipmentCountChange({target: {value: '4'}});
+  assert.equal(first.equipmentIds.length, 4);
+  assert.equal(first.equipmentIds[0], originalId);
+  assert.equal(new Set([...first.equipmentIds, ...second.equipmentIds]).size, 8);
+  panel.handleEquipmentCountChange({target: {value: '4'}});
+  assert.equal(updates, 1, 'blur does not commit the same count twice');
+  for (const raw of ['', '0', '-1', '1.5', 'Infinity', '9007199254740992']) {
+    const event = {target: {value: raw}};
+    panel.handleEquipmentCountChange(event);
+    assert.equal(event.target.value, '4');
+    workspace.handleUpdateComponentProperties({id: first.id, equipmentCount: Number(raw)});
+    assert.equal(first.equipmentCount, 4);
+  }
+  panel.handleWorkstationTimeChange('processingTime', {target: {value: '1:2:3:4.005'}});
+  panel.handleWorkstationTimeChange('setupTime', {target: {value: '0:0.001'}});
+  assert.equal(first.processingTime, 93784.005);
+  assert.equal(first.setupTime, .001);
+  const invalid = {target: {value: '-1'}};
+  panel.handleWorkstationTimeChange('setupTime', invalid);
+  assert.equal(invalid.target.value, '0:0.001');
+  const removedIds = Array.from(first.equipmentIds.slice(1));
+  panel.handleEquipmentCountChange({target: {value: '1'}});
+  panel.handleEquipmentCountChange({target: {value: '4'}});
+  assert.equal(first.equipmentIds[0], originalId);
+  assert.ok(first.equipmentIds.slice(1).every(id => !removedIds.includes(id)));
+  const restored = JSON.parse(JSON.stringify(first));
+  workstationProperties.ensureParallelWorkstationEquipment(restored);
+  assert.deepEqual(Array.from(restored.equipmentIds), Array.from(first.equipmentIds));
+  props.selectedItem = second;
+  assert.equal(panel.parallelWorkstationProperties.value.processingTime, 60);
+  assert.equal(panel.parallelWorkstationProperties.value.setupTime, 0);
+  const file = path.resolve(__dirname, '../src/components/PropertyPanel.vue');
+  const {descriptor} = parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(compileTemplate({source: descriptor.template.content, filename: file, id: 'parallel-properties'}).errors, []);
+});
+
+test('workstation time edits preserve milliseconds, allow zero and stay with the selected device', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  const first = buffer({id: 'machine-1', type: 'workstation'});
+  const second = buffer({id: 'machine-2', type: 'workstation'});
+  workspace.placedComponents.value.push(first, second);
+  const props = vue.reactive({selectedItem: workspace.placedComponents.value[0]});
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => props,
+    defineEmits: () => (event, value) => workspace.handleUpdateComponentProperties(value),
+  }, 'workstationProperties, handleWorkstationTimeChange');
+  assert.equal(panel.workstationProperties.value.processingTime, 60);
+  assert.equal(panel.workstationProperties.value.setupTime, 0);
+  for (const [field, text, seconds] of [
+    ['processingTime', '01:02:03:04.005', 93784.005], ['setupTime', '1:0.123', 60.123], ['processingTime', '0', 0],
+  ]) {
+    const event = {target: {value: text}};
+    panel.handleWorkstationTimeChange(field, event);
+    assert.equal(props.selectedItem[field], seconds);
+    assert.equal(inputRules.parseGenerationInterval(event.target.value, {allowZero: true}), seconds);
+  }
+  props.selectedItem = workspace.placedComponents.value[1];
+  assert.equal(panel.workstationProperties.value.processingTime, 60);
+  assert.equal(panel.workstationProperties.value.setupTime, 0);
+  panel.handleWorkstationTimeChange('setupTime', {target: {value: '0.001'}});
+  assert.equal(props.selectedItem.setupTime, .001);
+  props.selectedItem = workspace.placedComponents.value[0];
+  assert.equal(panel.workstationProperties.value.processingTime, 0);
+  assert.equal(panel.workstationProperties.value.setupTime, 60.123);
+});
+
+test('invalid workstation times restore the saved value and cannot change other component types', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(buffer({id: 'machine', type: 'workstation', processingTime: 60, setupTime: 0}));
+  const props = vue.reactive({selectedItem: workspace.placedComponents.value[0]});
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => props,
+    defineEmits: () => (event, value) => workspace.handleUpdateComponentProperties(value),
+  }, 'handleWorkstationTimeChange');
+  for (const text of ['', '-1', 'NaN', 'Infinity', '1:60', '1:24:0:0', '1:2:3:4:5', '0.0001', '9007199254740992']) {
+    const event = {target: {value: text}};
+    panel.handleWorkstationTimeChange('processingTime', event);
+    assert.equal(event.target.value, '1:0', text);
+    assert.equal(props.selectedItem.processingTime, 60);
+  }
+  for (const value of [-1, NaN, Infinity, '60', Number.MAX_VALUE]) {
+    workspace.handleUpdateComponentProperties({id: 'machine', processingTime: value});
+    assert.equal(props.selectedItem.processingTime, 60);
+  }
+  props.selectedItem.type = 'buffer';
+  panel.handleWorkstationTimeChange('processingTime', {target: {value: '2:0'}});
+  workspace.handleUpdateComponentProperties({id: 'machine', processingTime: 120});
+  assert.equal(props.selectedItem.processingTime, 60);
+  assert.ok(Number.isNaN(inputRules.parseGenerationInterval('0')), 'input intervals still reject zero');
+});
+
+test('port offsets are validated, clamped independently on resize and rotated with the component', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(
+    {id: 'machine', type: 'workstation', x: -3, y: -2, width: 6, height: 4},
+    {id: 'source', type: 'systemInput', x: 0, y: 0, width: 3, height: 3},
+    {id: 'sink', type: 'systemOutput', x: 10, y: 0, width: 3, height: 3},
+  );
+  const [machine, source, sink] = workspace.placedComponents.value;
+  const props = vue.reactive({selectedItem: machine});
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => props,
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'componentPorts, handlePortCoordinateChange, portError, handleDimensionChange, rotateSelectedComponent');
+  const ports = () => Array.from(panel.componentPorts.value, ({key, offset}) => [key, offset.x, offset.y]);
+  assert.deepEqual(ports(), [['loadPoint', -3, 0], ['unloadPoint', 3, 0]]);
+  const edit = (key, axis, value) => {
+    const target = {value};
+    panel.handlePortCoordinateChange(key, axis, {target});
+    return target.value;
+  };
+  assert.equal(edit('loadPoint', 'x', '-2.25'), '-2.25');
+  assert.equal(edit('loadPoint', 'y', '1.75'), '1.75');
+  assert.equal(edit('loadPoint', 'y', '2.01'), '1.75');
+  assert.match(panel.portError.value, /上料点 Y.*-2 至 2/);
+  assert.equal(edit('unloadPoint', 'x', '1'), '1');
+  assert.equal(panel.portError.value, '');
+  panel.handleDimensionChange('width', {target: {value: '4'}});
+  assert.deepEqual(ports(), [['loadPoint', -2, 1.75], ['unloadPoint', 1, 0]]);
+  panel.handleDimensionChange('width', {target: {value: '8'}});
+  assert.deepEqual(ports(), [['loadPoint', -2, 1.75], ['unloadPoint', 1, 0]]);
+  panel.rotateSelectedComponent(1);
+  assert.deepEqual(ports(), [['loadPoint', 1.75, 2], ['unloadPoint', 0, -1]]);
+  assert.equal(edit('loadPoint', 'y', '4'), '4');
+  panel.handleDimensionChange('width', {target: {value: '2'}});
+  assert.deepEqual(ports(), [['loadPoint', 1, 4], ['unloadPoint', 0, -1]]);
+  assert.deepEqual({...stations.getComponentCenter(machine)}, {x: 0, y: 0});
+  props.selectedItem = source;
+  assert.deepEqual(ports(), [['unloadPoint', 1.5, 0]]);
+  props.selectedItem = sink;
+  assert.deepEqual(ports(), [['loadPoint', -1.5, 0]]);
+});
+
+test('connection lines and canvas rings use the same unloading and loading points', (t) => {
+  const from = {id: 'from', type: 'systemInput', x: 0, y: 0, width: 4, height: 4, unloadPoint: {x: 1, y: 1}};
+  const to = {id: 'to', type: 'systemOutput', x: 10, y: 0, width: 4, height: 4, loadPoint: {x: -1, y: -2}};
+  const link = {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'};
+  const canvas = createCanvas([from, to, link]);
+  t.after(() => canvas.dispose());
+  const route = connectionGeometry.getConnectionGeometry(link, [from, to]);
+  assert.deepEqual({...route.start}, {x: 3, y: 3});
+  assert.deepEqual({...route.end}, {x: 11, y: 0});
+  near(route.length, Math.hypot(8, 3));
+  assert.equal(connectionGeometry.getConnectionGeometry({...link, fromId: 'to', toId: 'from'}, [from, to]), null);
+
+  const rings = [];
+  const ctx = canvas.element.getContext();
+  let arc = null;
+  ctx.beginPath = () => { arc = null; };
+  ctx.arc = (x, y, radius) => { arc = {x, y, radius}; };
+  ctx.stroke = () => { if (arc) rings.push({...arc, color: ctx.strokeStyle}); };
+  canvas.api.drawGridNow();
+  const endpoints = canvas.api.resolveLineEndpoints(link);
+  assert.deepEqual(rings, [
+    {...endpoints.start, radius: 4, color: '#dc2626'},
+    {...endpoints.end, radius: 4, color: '#16a34a'},
+  ]);
+});
+
+test('a connection using offsets set at the centers keeps its length when resized around those centers', () => {
   const from = buffer({id: 'from', x: -53, y: -14, width: 100, height: 20});
   const to = buffer({id: 'to', x: -.5, y: -40, width: 1, height: 80});
   const line = {type: 'connectionLine', fromId: 'from', toId: 'to'};
@@ -1088,6 +1841,93 @@ test('connection angle follows the positive X and Y axes and preserves equivalen
   near(connectionGeometry.getConnectionGeometry(line, [from, to]).angle, 270);
   Object.assign(to, {x: 1, y: 1});
   near(connectionGeometry.getConnectionGeometry(line, [from, to]).angle, 45);
+});
+
+test('the floating radius editor stays with its corner and can consume the full shared straight', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, activeDialog, dialogItem, dialogConnectionCorner, openDialog, saveDialog');
+  workspace.placedComponents.value.push(buffer({id: 'from', x: -1.5, y: -1.5}), buffer({id: 'to', x: 18.5, y: 8.5}),
+    {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to', waypoints: [{x: 8, y: 0}, {x: 8, y: 10}]});
+  const line = workspace.placedComponents.value[2];
+  const selectedItem = vue.ref(line);
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({get selectedItem() { return selectedItem.value; }, placedComponents: workspace.placedComponents.value}),
+    defineEmits: () => (event, update) => {
+      if (event === 'open-dialog') workspace.openDialog(update);
+    },
+  }, 'connectionGeometry, openConnectionRadius');
+  const openRadius = row => {
+    panel.openConnectionRadius(row);
+    return loadComponent('Dialog', {
+      defineProps: () => ({item: workspace.dialogItem.value, dialogType: workspace.activeDialog.value.dialogType,
+        get connectionCorner() { return workspace.dialogConnectionCorner.value; }}),
+      defineEmits: () => (event, payload) => {
+        if (event === 'save') workspace.saveDialog(payload);
+        if (event === 'close') workspace.activeDialog.value = null;
+      },
+      window: {innerWidth: 1280, innerHeight: 800}, systemInputIcon: '',
+    }, 'radiusDraft, radiusValid, saveConnectionRadius, emit');
+  };
+  const rows = () => panel.connectionGeometry.value.rows;
+  assert.deepEqual(Array.from(rows(), row => row.type), ['Line', 'Point', 'Line', 'Point', 'Line']);
+  const first = openRadius(rows()[1]);
+  assert.equal(first.radiusDraft.value, 0);
+  first.radiusDraft.value = rows()[1].maxRadius;
+  selectedItem.value = workspace.placedComponents.value[0];
+  assert.equal(workspace.dialogItem.value.id, line.id);
+  first.saveConnectionRadius();
+  assert.equal(workspace.activeDialog.value, null);
+  selectedItem.value = line;
+  near(rows()[1].radius, 8);
+  near(rows()[0].length, 0);
+  const second = openRadius(rows()[3]);
+  near(workspace.dialogConnectionCorner.value.maxRadius, 2);
+  second.radiusDraft.value = 3;
+  assert.equal(second.radiusValid.value, false);
+  second.saveConnectionRadius();
+  assert.equal(rows()[3].type, 'Point');
+  second.radiusDraft.value = workspace.dialogConnectionCorner.value.maxRadius;
+  second.saveConnectionRadius();
+  assert.deepEqual(Array.from(rows(), row => row.type), ['Line', 'Arc', 'Line', 'Arc', 'Line']);
+  near(rows()[2].length, 0);
+  assert.equal(rows()[2].angle, 90);
+  assert.ok(rows().filter(row => row.type === 'Line').every(row => row.length >= 0));
+  const cancel = openRadius(rows()[1]);
+  near(cancel.radiusDraft.value, 8);
+  cancel.radiusDraft.value = 0;
+  cancel.emit('close');
+  assert.equal(rows()[1].type, 'Arc');
+  const reset = openRadius(rows()[1]);
+  reset.radiusDraft.value = 0;
+  reset.saveConnectionRadius();
+  assert.equal(rows()[1].type, 'Point');
+  assert.deepEqual({...rows()[1].point}, {x: 8, y: 0});
+});
+
+test('lengths and angles edit the chosen waypoint while keeping the two component ports fixed', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(buffer({id: 'from', x: -1.5, y: -1.5}), buffer({id: 'to', x: 18.5, y: 8.5}),
+    {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to', affectedEndpoint: 'from',
+      waypoints: [{x: 8, y: 0}, {x: 8, y: 10}], cornerRadii: [2, 1]});
+  const line = workspace.placedComponents.value[2];
+  const route = () => connectionGeometry.getConnectionGeometry(line, workspace.placedComponents.value);
+  const edit = (index, fields) => workspace.handleUpdateComponentProperties({id: line.id, connectionSegment: {index, ...fields}});
+  edit(0, {length: 4});
+  assert.equal(line.affectedEndpoint, 'to');
+  near(route().rows[0].length, 4);
+  assert.equal(route().rows[0].angle, 0);
+  assert.deepEqual({...line.waypoints[1]}, {x: 8, y: 10});
+  const lastLength = route().rows[4].length;
+  edit(2, {angle: 30});
+  assert.equal(line.affectedEndpoint, 'from');
+  near(route().rows[4].angle, 30);
+  near(route().rows[4].length, lastLength);
+  const second = {...line.waypoints[1]};
+  edit(1, {length: 5});
+  near(route().rows[2].length, 5);
+  assert.deepEqual({...line.waypoints[1]}, second);
+  assert.deepEqual({...route().start}, {x: 0, y: 0});
+  assert.deepEqual({...route().end}, {x: 20, y: 10});
 });
 
 test('editing connection length or angle moves only its endpoint and speed is stored independently', () => {
@@ -1165,27 +2005,30 @@ test('connection geometry edits reject invalid numbers and retain direction thro
   near(to.x, 0); near(to.y, 7);
 });
 
-test('connection property fields update the parent without duplicate blur updates or rounding untouched lengths', () => {
+test('connection table edits a segment without rounding untouched values or issuing duplicate updates', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
   workspace.placedComponents.value.push(buffer({id: 'from', x: 0, y: 0}), buffer({id: 'to', x: 1, y: 1}),
     {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'});
   const events = [];
   const properties = loadComponent('PropertyPanel', {
     defineProps: () => ({selectedItem: workspace.placedComponents.value[2], placedComponents: workspace.placedComponents.value}),
-    defineEmits: () => (_, payload) => { events.push(payload); workspace.handleUpdateComponentProperties(payload); },
-  }, 'connectionLength, connectionAngle, connectionWorkpieceSpeed, handleConnectionPropertyChange');
-  assert.equal(properties.connectionLength.value, 1.41);
-  properties.handleConnectionPropertyChange('length', {target: {value: '1.41'}});
+    defineEmits: () => (_, update) => {
+      events.push(update);
+      workspace.handleUpdateComponentProperties(update);
+    },
+  }, 'connectionGeometry, connectionCellEdit, startConnectionCellEdit, saveConnectionCellEdit, handleConnectionPropertyChange');
+  properties.startConnectionCellEdit(properties.connectionGeometry.value.rows[0], 'length');
+  properties.saveConnectionCellEdit();
   assert.equal(events.length, 0);
-  properties.handleConnectionPropertyChange('length', {target: {value: '10'}});
-  properties.handleConnectionPropertyChange('length', {target: {value: '10'}});
+  near(properties.connectionGeometry.value.length, Math.SQRT2);
+  properties.startConnectionCellEdit(properties.connectionGeometry.value.rows[0], 'length');
+  properties.connectionCellEdit.value.value = '10';
+  properties.saveConnectionCellEdit();
+  properties.saveConnectionCellEdit();
   assert.equal(events.length, 1);
-  near(connectionGeometry.getConnectionGeometry(workspace.placedComponents.value[2], workspace.placedComponents.value).length, 10);
-  const invalid = {value: '400'};
-  properties.handleConnectionPropertyChange('angle', {target: invalid});
-  assert.equal(invalid.value, '45');
-  properties.handleConnectionPropertyChange('workpieceSpeed', {target: {value: '0'}});
-  assert.equal(properties.connectionWorkpieceSpeed.value, 0);
+  near(properties.connectionGeometry.value.length, 10);
+  properties.handleConnectionPropertyChange('workpieceSpeed', {target: {value: '5'}});
+  assert.equal(workspace.placedComponents.value[2].workpieceSpeed, 5);
 });
 
 test('system input and output have distinct shaded rectangles and editable physical dimensions', () => {

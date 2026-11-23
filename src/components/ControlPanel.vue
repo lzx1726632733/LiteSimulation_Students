@@ -39,7 +39,9 @@ const panelVisible = ref(true);
 // 当前选中的控件，格式: "tabId-controlId"
 // 初始化时选中第一个tab的第一个控件："commonControl-1"
 const firstControl = menuControls[tabList[0].id]?.[0];
-const activeControlId = ref(firstControl ? `${tabList[0].id}-${firstControl.id}` : null);
+const defaultControlId = firstControl ? `${tabList[0].id}-${firstControl.id}` : null;
+const activeControlId = ref(defaultControlId);
+let lastTool = null;
 
 // 计算当前激活控件的完整信息
 const activeControlInfo = computed(() => {
@@ -73,23 +75,29 @@ const handleTabClick = (tab) => {
     // 切换标签
     activeKey.value = tab.id;
     // 重置为默认的"选择"控件
-    const defaultControl = menuControls[tabList[0].id]?.[0];
-    activeControlId.value = defaultControl ? `${tabList[0].id}-${defaultControl.id}` : null;
+    resetToSelect();
 };
 
 //控件点击事件
 const handleClickControl = (item) => {
     // 设置当前激活的控件，组合 tab 和 控件 id
     activeControlId.value = `${activeKey.value}-${item.id}`;
+    if (item.type !== 'select') lastTool = {tabId: activeKey.value, id: activeControlId.value};
 };
 
 // 重置为默认的"选择"控件（供父组件调用）
 const resetToSelect = () => {
-    const defaultControl = menuControls[tabList[0].id]?.[0];
-    activeControlId.value = defaultControl ? `${tabList[0].id}-${defaultControl.id}` : null;
+    activeControlId.value = defaultControlId;
 };
 
-defineExpose({ resetToSelect });
+const repeatLastTool = () => {
+    if (!lastTool || activeControlId.value !== defaultControlId) return false;
+    activeKey.value = lastTool.tabId;
+    activeControlId.value = lastTool.id;
+    return true;
+};
+
+defineExpose({ resetToSelect, repeatLastTool });
 </script>
 
 

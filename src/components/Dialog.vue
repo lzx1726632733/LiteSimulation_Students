@@ -6,7 +6,7 @@
             <header class="dialog-titlebar" @pointerdown="startInteraction($event, 'move')"
                     @pointermove="moveInteraction" @pointerup="endInteraction" @pointercancel="endInteraction"
                     @lostpointercapture="endInteraction">
-                <img :src="dialogDefinition?.icon || dialogIcon" alt="" draggable="false">
+                <img :src="activeDialogIcon" alt="" draggable="false">
                 <span id="dialog-title">{{ dialogTitle }}</span>
                 <button class="close-button" type="button" aria-label="关闭" @pointerdown.stop @click="emit('close')">×</button>
             </header>
@@ -57,9 +57,92 @@
                 <p v-if="validationMessage" class="rule-error" role="alert">{{ validationMessage }}</p>
             </template>
 
+            <template v-else-if="isBomEditor">
+                <div class="assembly-fields" :class="{'disassembly-fields': isDisassemblyEditor}">
+                    <label>{{ bomObjectLabel }}类型 <input v-model="recipeDraft.productType" type="text" required></label>
+                    <label v-if="isAssemblyEditor">类型
+                        <select v-if="assemblyMode === 'container'" v-model="recipeDraft.packingType">
+                            <option v-for="type in CONTAINER_TYPES" :key="type">{{ type }}</option>
+                        </select>
+                        <input v-else :value="recipeDraft.packingType" disabled>
+                    </label>
+                    <label>{{ isDisassemblyEditor ? '拆卸时长' : '装配时长' }}
+                        <input v-model="recipeDraft[durationField]" title="dd:hh:mm:ss.ms" required
+                               @blur="formatBomDuration(durationField)">
+                    </label>
+                    <label>{{ bomObjectLabel }}名称 <input v-model="recipeDraft.name" type="text"></label>
+                    <label v-if="isAssemblyEditor">颜色
+                        <input class="assembly-color" type="color" v-model="recipeDraft.fillColor"
+                               :style="{'--assembly-fill': recipeDraft.fillColor}"
+                               title="双击修改颜色，或按 Enter 打开颜色选择器"
+                               @click.prevent @dblclick="openColorPicker"
+                               @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
+                    </label>
+                    <label>准备时长
+                        <input v-model="recipeDraft.setupTime" title="dd:hh:mm:ss.ms" required
+                               @blur="formatBomDuration('setupTime')">
+                    </label>
+                </div>
+                <p v-if="isDisassemblyEditor && disassemblyMode === 'container'" class="bom-hint">提示：容器到站后自动卸下全部零件，无需填写 BOM。</p>
+                <div class="table-container assembly-materials">
+                    <table :aria-label="isDisassemblyEditor ? '拆卸零件清单' : '装配所需工件'">
+                        <thead>
+                            <tr>
+                                <th scope="col">{{ materialTypeLabel }}</th>
+                                <th scope="col">{{ materialLabel }}数量</th>
+                                <th scope="col">{{ materialLabel }}名称</th>
+                                <th v-if="isDisassemblyEditor" scope="col">零件颜色</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(row, index) in recipeDraft.materials" :key="index" tabindex="0"
+                                :class="{selected: selectedMaterialRow === index}" :aria-selected="selectedMaterialRow === index"
+                                @click="selectedMaterialRow = index" @focusin="selectedMaterialRow = index">
+                                <td><input v-model="row.partType" class="cell-input" :aria-label="`第 ${index + 1} 行${materialTypeLabel}`" required></td>
+                                <td><input v-model.number="row.quantity" class="cell-input" type="number" min="1" step="1"
+                                           :aria-label="`第 ${index + 1} 行${materialLabel}数量`" required></td>
+                                <td><input v-model="row.name" class="cell-input" :aria-label="`第 ${index + 1} 行${materialLabel}名称`"></td>
+                                <td v-if="isDisassemblyEditor">
+                                    <input v-model="row.fillColor" class="color-swatch" type="color"
+                                           :aria-label="`第 ${index + 1} 行零件颜色`"
+                                           title="双击修改颜色，或按 Enter 打开颜色选择器"
+                                           @click.prevent @dblclick="openColorPicker"
+                                           @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p v-if="bomError" class="rule-error" role="alert">{{ bomError }}</p>
+            </template>
+
+            <form v-else-if="isConnectionRadiusEditor" id="connection-radius-form" class="connection-radius-form"
+                  @submit.prevent="saveConnectionRadius">
+                <label for="connection-radius">半径（米）</label>
+                <input ref="radiusInput" id="connection-radius" v-model.number="radiusDraft" type="number"
+                       step="any" min="0" :max="connectionCorner?.maxRadius" required
+                       aria-describedby="connection-radius-range"/>
+                <p id="connection-radius-range" v-if="connectionCorner">
+                    范围 0 至 {{ connectionCorner.maxRadius }} 米。输入 0 恢复为拐点。
+                </p>
+                <p id="connection-radius-range" v-else>当前拐点已不可用。</p>
+            </form>
+
             <footer class="dialog-footer">
-                <button type="button" class="save-button" :disabled="!dialogDefinition || !!validationMessage" @click="saveDialog">保存退出</button>
-                <button type="button" @click="emit('close')">退出</button>
+                <template v-if="isBomEditor">
+                    <button type="button" @click="addMaterialRow">增加行</button>
+                    <button type="button" :disabled="selectedMaterialRow === null" @click="deleteMaterialRow">删除行</button>
+                    <button type="button" class="save-button" :disabled="!!bomError" @click="saveBomRecipe">确定</button>
+                    <button type="button" @click="emit('close')">取消</button>
+                </template>
+                <template v-else-if="isConnectionRadiusEditor">
+                    <button type="submit" form="connection-radius-form" class="save-button" :disabled="!radiusValid">确定</button>
+                    <button type="button" @click="emit('close')">取消</button>
+                </template>
+                <template v-else>
+                    <button type="button" class="save-button" :disabled="!dialogDefinition || !!validationMessage" @click="saveDialog">保存退出</button>
+                    <button type="button" @click="emit('close')">退出</button>
+                </template>
             </footer>
 
             <div v-for="edge in resizeEdges" :key="edge" :class="['resize-handle', `resize-${edge}`]"
@@ -74,46 +157,136 @@ import {computed, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue';
 import {getComponentLabel} from '../utils/componentLabel.js';
 import systemInputIcon from '../assets/icons/systemInput.svg';
 import dialogIcon from '../assets/icons/logo.svg';
-import {PART_COLORS, getInputRuleProbabilities, getInputRuleValidationMessage, getDefaultWorkpieceDimensions} from '../utils/inputRules.js';
+import assemblyIcon from '../assets/icons/assemblyWorkstation.svg';
+import disassemblyIcon from '../assets/icons/disassemblyWorkstation.svg';
+import connectionIcon from '../assets/icons/connectionLine.svg';
+import {PART_COLORS, getInputType, getInputRuleCategory, getInputRuleProbabilities, getInputRuleValidationMessage, getDefaultWorkpieceDimensions, parseGenerationInterval, formatGenerationInterval} from '../utils/inputRules.js';
+import {CONTAINER_TYPES, getAssemblyRecipeError} from '../utils/assemblyRecipes.js';
+import {getDisassemblyRecipeError} from '../utils/disassemblyRecipes.js';
 
 const props = defineProps({
     item: {type: Object, required: true},
     dialogType: {type: String, required: true},
+    assemblyRecipe: {type: Object, default: null},
+    assemblyMode: {type: String, default: 'parts'},
+    assemblyPackingType: {type: String, default: 'Workpiece'},
+    disassemblyRecipe: {type: Object, default: null},
+    disassemblyMode: {type: String, default: 'parts'},
+    connectionCorner: {type: Object, default: null},
 });
 const emit = defineEmits(['close', 'save']);
 const dialog = ref(null);
+const inputType = computed(() => getInputType(props.item));
 // 第一层区分控件类型，第二层区分该控件的弹窗用途。
 const dialogDefinitions = {
     systemInput: {
         'input-rule': {
-            title: '产生的 Part 类型及相对比例',
             icon: systemInputIcon,
             dataField: 'inputRuleRows',
         },
     },
 };
 const dialogDefinition = computed(() => dialogDefinitions[props.item.type]?.[props.dialogType]);
-const dialogTitle = computed(() => getComponentLabel(props.item) + (dialogDefinition.value?.title ?? '设置'));
+const isAssemblyEditor = computed(() => props.item.type === 'assemblyWorkstation' && props.dialogType === 'assembly-recipe');
+const isDisassemblyEditor = computed(() => props.item.type === 'disassemblyWorkstation' && props.dialogType === 'disassembly-recipe');
+const isBomEditor = computed(() => isAssemblyEditor.value || isDisassemblyEditor.value);
+const isConnectionRadiusEditor = computed(() => props.item.type === 'connectionLine' && props.dialogType === 'connection-radius');
+const radiusInput = ref(null);
+const radiusDraft = ref(props.connectionCorner?.radius ?? '');
+const radiusValid = computed(() => Number.isFinite(radiusDraft.value) && radiusDraft.value >= 0 &&
+    radiusDraft.value <= (props.connectionCorner?.maxRadius ?? -1));
+
+function saveConnectionRadius() {
+    if (!radiusValid.value) return;
+    emit('save', {itemId: props.item.id, dialogType: props.dialogType, radius: radiusDraft.value});
+}
+
+const activeDialogIcon = computed(() => {
+    if (isConnectionRadiusEditor.value) return connectionIcon;
+    if (isDisassemblyEditor.value) return disassemblyIcon;
+    if (isAssemblyEditor.value) return assemblyIcon;
+    return dialogDefinition.value?.icon || dialogIcon;
+});
+const originalRecipe = isDisassemblyEditor.value ? props.disassemblyRecipe : props.assemblyRecipe;
+const durationField = isDisassemblyEditor.value ? 'disassemblyTime' : 'assemblyTime';
+const dialogTitle = computed(() => {
+    if (isConnectionRadiusEditor.value) return `${getComponentLabel(props.item)} · 编辑圆弧半径`;
+    if (isBomEditor.value) {
+        const title = isDisassemblyEditor.value ? '拆卸 BOM 清单' : 'BOM清单';
+        return `${title} · ${originalRecipe ? '编辑行' : '增加行'}`;
+    }
+    return getComponentLabel(props.item) + (dialogDefinition.value ? `产生的 ${inputType.value} 类别及相对比例` : '设置');
+});
+const bomObjectLabel = computed(() => {
+    if (isDisassemblyEditor.value) return props.disassemblyMode === 'container' ? '容器' : '部件';
+    return props.assemblyMode === 'container' ? '容器' : '装配件';
+});
+const materialLabel = computed(() => isDisassemblyEditor.value ? '零件' : '工件');
+const materialTypeLabel = computed(() => isDisassemblyEditor.value ? '零件类型' : '工件类别');
+const recipeDraft = reactive({
+    productType: originalRecipe?.productType ?? '',
+    name: originalRecipe?.name ?? '',
+    ...(isAssemblyEditor.value ? {
+        packingType: props.assemblyPackingType ?? 'Workpiece',
+        fillColor: originalRecipe?.fillColor ?? '#000000',
+    } : {}),
+    [durationField]: isBomEditor.value ? formatGenerationInterval(originalRecipe?.[durationField] ?? 300) : '',
+    setupTime: isBomEditor.value ? formatGenerationInterval(originalRecipe?.setupTime ?? 0) : '',
+    materials: originalRecipe?.materials?.map(row => ({...row})) ?? [],
+});
+const selectedMaterialRow = ref(null);
+const normalizedRecipe = computed(() => ({
+    ...recipeDraft,
+    productType: recipeDraft.productType.trim(),
+    name: recipeDraft.name.trim(),
+    [durationField]: parseGenerationInterval(recipeDraft[durationField], {allowZero: true}),
+    setupTime: parseGenerationInterval(recipeDraft.setupTime, {allowZero: true}),
+    materials: recipeDraft.materials.map(row => ({...row, partType: row.partType.trim(), name: row.name.trim()})),
+}));
+const bomError = computed(() => isDisassemblyEditor.value
+    ? getDisassemblyRecipeError(normalizedRecipe.value, {allowEmpty: props.disassemblyMode === 'container'})
+    : getAssemblyRecipeError(normalizedRecipe.value));
+
+function formatBomDuration(field) {
+    const seconds = parseGenerationInterval(recipeDraft[field], {allowZero: true});
+    if (Number.isFinite(seconds)) recipeDraft[field] = formatGenerationInterval(seconds);
+}
+
+function addMaterialRow() {
+    const row = {partType: '', quantity: '', name: ''};
+    if (isDisassemblyEditor.value) row.fillColor = '#000000';
+    recipeDraft.materials.push(row);
+    selectedMaterialRow.value = recipeDraft.materials.length - 1;
+}
+
+function deleteMaterialRow() {
+    if (selectedMaterialRow.value === null) return;
+    recipeDraft.materials.splice(selectedMaterialRow.value, 1);
+    selectedMaterialRow.value = null;
+}
+
+function saveBomRecipe() {
+    if (!isBomEditor.value || bomError.value) return;
+    const field = isDisassemblyEditor.value ? 'disassemblyRecipe' : 'assemblyRecipe';
+    emit('save', {itemId: props.item.id, dialogType: props.dialogType, [field]: normalizedRecipe.value});
+}
 
 // 输入规则窗口的草稿，仅在保存时写回对应控件。
 const rows = ref([]);
 const selectedRow = ref(null);
-let nextPartNumber = 1;
+let nextColorIndex = 0;
 watch(() => [props.item.id, props.item.type, props.dialogType], () => {
     const savedRows = props.item[dialogDefinition.value?.dataField];
-    rows.value = Array.isArray(savedRows) ? savedRows.map((row, index) => ({
+    rows.value = Array.isArray(savedRows) ? savedRows.map(({entityType, ...row}, index) => ({
         ...row,
-        partType: row.partType ?? `Part${index + 1}`,
+        partType: getInputRuleCategory({...row, entityType}) ?? '',
         name: row.name ?? '',
         length: row.length ?? getDefaultWorkpieceDimensions(props.item).length,
         width: row.width ?? getDefaultWorkpieceDimensions(props.item).width,
         fillColor: row.fillColor ?? PART_COLORS[index % PART_COLORS.length],
         relativeWeight: row.relativeWeight ?? 100,
     })) : [];
-    nextPartNumber = rows.value.reduce((max, row) => {
-        const match = /^Part(\d+)$/.exec(row.partType);
-        return match ? Math.max(max, Number(match[1])) : max;
-    }, 0) + 1;
+    nextColorIndex = rows.value.length;
     selectedRow.value = null;
 }, {immediate: true});
 
@@ -141,24 +314,24 @@ function saveDialog() {
         },
     });
 }
-const columns = [
-    {key: 'partType', label: 'Part类型'},
-    {key: 'name', label: '名称'},
+const columns = computed(() => [
+    {key: 'partType', label: `${inputType.value}类别`},
+    {key: 'name', label: `${inputType.value}名称`},
     {key: 'length', label: '实际长度', title: '单位：毫米（mm）'},
     {key: 'width', label: '实际宽度', title: '单位：毫米（mm）'},
     {key: 'fillColor', label: '填充色'},
     {key: 'relativeWeight', label: '相对比例值'}
-];
+]);
 
 function addRow() {
     rows.value.push({
-        partType: `Part${nextPartNumber}`,
+        partType: inputType.value,
         name: '',
         ...getDefaultWorkpieceDimensions(props.item),
-        fillColor: PART_COLORS[(nextPartNumber - 1) % PART_COLORS.length],
+        fillColor: PART_COLORS[nextColorIndex % PART_COLORS.length],
         relativeWeight: 100,
     });
-    nextPartNumber++;
+    nextColorIndex++;
     selectedRow.value = rows.value.length - 1;
 }
 
@@ -171,15 +344,17 @@ function deleteRow() {
 function clearRows() {
     rows.value = [];
     selectedRow.value = null;
-    nextPartNumber = 1;
+    nextColorIndex = 0;
 }
 
 // 每次打开采用相同的默认位置和尺寸，小视口下自动缩小到可见范围。
+const defaultWidth = isConnectionRadiusEditor.value ? 440 : 920;
+const defaultHeight = isConnectionRadiusEditor.value ? 260 : 560;
 const bounds = reactive({
-    left: Math.max(8, (window.innerWidth - 920) / 2),
-    top: Math.min(120, Math.max(8, window.innerHeight - 568)),
-    width: Math.min(920, window.innerWidth - 16),
-    height: Math.min(560, window.innerHeight - 16),
+    left: Math.max(8, (window.innerWidth - defaultWidth) / 2),
+    top: Math.min(120, Math.max(8, window.innerHeight - defaultHeight - 8)),
+    width: Math.min(defaultWidth, window.innerWidth - 16),
+    height: Math.min(defaultHeight, window.innerHeight - 16),
 });
 const windowStyle = computed(() => ({
     left: `${bounds.left}px`, top: `${bounds.top}px`,
@@ -244,7 +419,9 @@ function fitToViewport() {
 let previousFocus;
 onMounted(() => {
     previousFocus = document.activeElement;
-    dialog.value.focus({preventScroll: true});
+    const focusTarget = radiusInput.value ?? dialog.value;
+    focusTarget.focus({preventScroll: true});
+    radiusInput.value?.select();
     window.addEventListener('resize', fitToViewport);
 });
 onBeforeUnmount(() => {
@@ -306,6 +483,24 @@ onBeforeUnmount(() => {
 }
 .floating-dialog .close-button:hover { background: #e81123; color: white; }
 .dialog-toolbar { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; padding: 10px 8px 8px; }
+.assembly-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; padding: 8px 12px 12px; overflow: auto; }
+.assembly-fields.disassembly-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.bom-hint { margin: 0 12px 8px; color: #c02626; }
+.assembly-fields label { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.assembly-fields input, .assembly-fields select { min-width: 0; flex: 1 1 90px; height: 28px; padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
+.assembly-fields input:disabled { background: #e9edf2; color: #4b5563; cursor: default; }
+.assembly-fields .assembly-color {
+    appearance: none;
+    padding: 0;
+    border-radius: 0;
+    border-color: color-mix(in srgb, var(--assembly-fill) 75%, black);
+    background-color: var(--assembly-fill);
+    cursor: pointer;
+}
+.assembly-color::-webkit-color-swatch-wrapper { padding: 0; }
+.assembly-color::-webkit-color-swatch { border: 0; }
+.assembly-color::-moz-color-swatch { border: 0; }
+.assembly-materials table { min-width: 300px; }
 .table-container { flex: 1; min-height: 0; margin: 0 7px; overflow: auto; border: 2px solid #5b96ff; background: white; }
 table { width: 100%; min-width: 760px; border-collapse: collapse; table-layout: fixed; }
 th, td { height: 26px; padding: 0 6px; text-align: center; font-weight: normal; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
@@ -345,7 +540,10 @@ tbody tr:focus-visible { outline: 1px solid #111; outline-offset: -1px; }
 .weight-cell { display: flex; flex-direction: column; align-items: center; }
 .probability { font-size: 11px; opacity: .8; }
 .rule-error { margin: 6px 8px 0; color: #b91c1c; }
-.dialog-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 12px 8px 8px; }
+.connection-radius-form { display: grid; align-content: start; gap: 8px; flex: 1; padding: 16px 12px; overflow: auto; }
+.connection-radius-form input { width: 100%; min-width: 0; box-sizing: border-box; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
+.connection-radius-form p { margin: 0; overflow-wrap: anywhere; }
+.dialog-footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; padding: 12px 8px 8px; }
 .floating-dialog .save-button { border-color: #0780ff; background: #0780ff; color: white; }
 .floating-dialog .save-button:hover { background: #006ad9; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

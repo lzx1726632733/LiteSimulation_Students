@@ -6,7 +6,7 @@ const TAU = Math.PI * 2;
 export const getPathWidth = (path) =>
   Number.isFinite(path.pathWidth) && path.pathWidth > 0 ? path.pathWidth : DEFAULT_PATH_WIDTH;
 
-const cornerGeometry = (nodes, i) => {
+export const getPathCorner = (nodes, i) => {
   const a = nodes[i - 1], b = nodes[i], c = nodes[i + 1];
   if (!a || !b || !c) return null;
   const before = Math.hypot(b.x - a.x, b.y - a.y);
@@ -23,7 +23,18 @@ const cornerGeometry = (nodes, i) => {
 };
 
 export const getCornerMaxRadius = (nodes, cornerIndex) =>
-  cornerGeometry(nodes || [], cornerIndex + 1)?.maxRadius || 0;
+  getPathCorner(nodes || [], cornerIndex + 1)?.maxRadius || 0;
+
+export const buildPathArc = (point, {u, v, turn, factor}, radius) => {
+  const distance = radius * factor;
+  const start = {x: point.x - u.x * distance, y: point.y - u.y * distance};
+  const end = {x: point.x + v.x * distance, y: point.y + v.y * distance};
+  const sign = Math.sign(turn);
+  const center = {x: start.x - u.y * radius * sign, y: start.y + u.x * radius * sign};
+  return {type: 'arc', start, end, center, radius,
+    startAngle: Math.atan2(start.y - center.y, start.x - center.x),
+    sweep: turn, length: Math.abs(turn) * radius};
+};
 
 export const buildPathGeometry = (path) => {
   const nodes = path.nodes || [];
@@ -36,21 +47,14 @@ export const buildPathGeometry = (path) => {
     cursor = end;
   };
   for (let i = 1; i < nodes.length - 1; i++) {
-    const corner = cornerGeometry(nodes, i);
+    const corner = getPathCorner(nodes, i);
     const requested = path.cornerRadii?.[i - 1];
     const radius = corner && Number.isFinite(requested) ? Math.max(0, Math.min(requested, corner.maxRadius)) : 0;
     if (radius < EPS) { lineTo(nodes[i]); continue; }
-    const { u, v, turn, factor } = corner;
-    const distance = radius * factor;
-    const start = { x: nodes[i].x - u.x * distance, y: nodes[i].y - u.y * distance };
-    const end = { x: nodes[i].x + v.x * distance, y: nodes[i].y + v.y * distance };
-    const sign = Math.sign(turn);
-    const center = { x: start.x - u.y * radius * sign, y: start.y + u.x * radius * sign };
-    lineTo(start);
-    segments.push({ type: "arc", start, end, center, radius,
-      startAngle: Math.atan2(start.y - center.y, start.x - center.x),
-      sweep: turn, length: Math.abs(turn) * radius });
-    cursor = end;
+    const arc = buildPathArc(nodes[i], corner, radius);
+    lineTo(arc.start);
+    segments.push(arc);
+    cursor = arc.end;
   }
   lineTo(nodes[nodes.length - 1]);
   return segments;
@@ -86,6 +90,19 @@ const angleOnArc = (angle, segment) => {
   return travel <= Math.abs(segment.sweep) + EPS || TAU - travel < EPS;
 };
 
+export const distanceToPathSegment = (segment, x, y) => {
+  const {start, end} = segment;
+  if (segment.type === 'arc') {
+    const dx = x - segment.center.x, dy = y - segment.center.y;
+    if (angleOnArc(Math.atan2(dy, dx), segment)) return Math.abs(Math.hypot(dx, dy) - segment.radius);
+    return Math.min(Math.hypot(x - start.x, y - start.y), Math.hypot(x - end.x, y - end.y));
+  }
+  if (!segment.length) return Math.hypot(x - start.x, y - start.y);
+  const {ux, uy} = pointOnPathSegment(segment, 0);
+  const along = Math.max(0, Math.min(segment.length, (x - start.x) * ux + (y - start.y) * uy));
+  return Math.hypot(x - start.x - along * ux, y - start.y - along * uy);
+};
+
 // 与 butt 端帽、round 接角的通道区域一致；允许调用方加入少量屏幕抓取余量。
 export const isPointInPathArea = (path, x, y, margin = 0) => {
   const segments = buildPathGeometry(path);
@@ -105,9 +122,9 @@ export const isPointInPathArea = (path, x, y, margin = 0) => {
   return segments.slice(1).some((segment) => Math.hypot(x - segment.start.x, y - segment.start.y) <= half);
 };
 
-export const getPathBounds = (path) => {
+export const getPathGeometryBounds = (segments, half = 0) => {
   const points = [];
-  for (const segment of buildPathGeometry(path)) {
+  for (const segment of segments) {
     points.push(segment.start, segment.end);
     if (segment.type === "arc") {
       for (const angle of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
@@ -116,7 +133,8 @@ export const getPathBounds = (path) => {
     }
   }
   if (!points.length) return null;
-  const half = getPathWidth(path) / 2;
   return { minX: Math.min(...points.map((p) => p.x)) - half, maxX: Math.max(...points.map((p) => p.x)) + half,
     minY: Math.min(...points.map((p) => p.y)) - half, maxY: Math.max(...points.map((p) => p.y)) + half };
 };
+
+export const getPathBounds = (path) => getPathGeometryBounds(buildPathGeometry(path), getPathWidth(path) / 2);
