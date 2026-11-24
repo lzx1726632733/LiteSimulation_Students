@@ -85,7 +85,7 @@ export const tracePathGeometry = (ctx, segments, scale) => {
   }
 };
 
-const angleOnArc = (angle, segment) => {
+export const angleOnArc = (angle, segment) => {
   const travel = ((angle - segment.startAngle) * Math.sign(segment.sweep) % TAU + TAU) % TAU;
   return travel <= Math.abs(segment.sweep) + EPS || TAU - travel < EPS;
 };

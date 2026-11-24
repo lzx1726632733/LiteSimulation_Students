@@ -8,5 +8,7 @@ export const simulationToolBarMenus = [
   { id: 'separator2'},
   { id: 'coordinate-system', name: '坐标系', icon: "/src/assets/icons/coordinateSystem.svg" },
   { id: 'separator3'},
+  { id: 'canvas', name: '有限画布', icon: "/src/assets/icons/canvas.svg" },
+  { id: 'separator4'},
   { id: 'clock', name: '仿真时间', icon: "/src/assets/icons/clock.svg" }
 ]

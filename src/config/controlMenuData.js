@@ -34,5 +34,11 @@ export const menuControls = {
     ],
     script: [
         {id: 1, name: "创建脚本", icon: "/src/assets/icons/createScript.svg", type: "createScript"}
+    ],
+    obstacle: [
+        {id: 1, name: "矩形障碍物", icon: "/src/assets/icons/rectangularObstacle.svg", type: "rectangularObstacle"},
+        {id: 2, name: "三角形障碍物", icon: "/src/assets/icons/triangularObstacle.svg", type: "triangularObstacle"},
+        {id: 3, name: "圆形障碍物", icon: "/src/assets/icons/circularObstacle.svg", type: "circularObstacle"},
+        {id: 4, name: "矩形墙", icon: "/src/assets/icons/rectangularWall.svg", type: "rectangularWall"}
     ]
 };

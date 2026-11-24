@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 1024" width="200" height="200">
+    <defs>
+        <clipPath id="triangle-interior">
+            <path d="M525.5 163 872.75 857.5H178.25Z"/>
+        </clipPath>
+    </defs>
+    <g fill="none" stroke="black" stroke-width="45.25">
+        <path d="M0 830 830 0 M0 1030 1030 0 M0 1230 1230 0 M0 1430 1430 0 M0 1630 1630 0"
+              clip-path="url(#triangle-interior)"/>
+        <path d="M525.5 163 872.75 857.5H178.25Z" stroke-linejoin="round"/>
+    </g>
+</svg>

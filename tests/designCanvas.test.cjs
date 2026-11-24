@@ -11,13 +11,33 @@ const source = fs.readFileSync(filename, 'utf8');
 const { descriptor } = parse(source, { filename });
 const agvGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/agvPath.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getCornerMaxRadius, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds, getPathCorner, buildPathArc, getPathGeometryBounds, distanceToPathSegment })');
-const stations = vm.runInNewContext(fs.readFileSync(
-  path.resolve(__dirname, '../src/utils/stations.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ STATION_TYPES, DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns })');
+).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getCornerMaxRadius, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds, getPathCorner, buildPathArc, getPathGeometryBounds, distanceToPathSegment, angleOnArc })');
+const triangle = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/triangleObstacle.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({TRIANGULAR_OBSTACLE_TYPE, DEFAULT_TRIANGLE_SIZE, TRIANGLE_FIELDS, getLocalTriangleVertices, getTriangleVertices, getTriangleChanges, getTriangleParameters, solveTriangle, orientTriangle, formatTriangleValue})');
+const rectangularWall = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/rectangularWall.js'), 'utf8',
+).replace(/export (const|function) /g, '$1 ') +
+  '\n;({RECTANGULAR_WALL_TYPE,DEFAULT_WALL_SIZE,WALL_SIDES,WALL_THICKNESS_MODES,getWallSettings,getWallGeometry,getWallOuterBounds,getWallSideOptions,getWallValidationError})');
 const componentAppearance = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/componentAppearance.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ RESIZABLE_COMPONENT_TYPES, DEFAULT_COMPONENT_SHADOW_COLORS, DEFAULT_COMPONENT_SIZES, getDefaultShadowColor })');
+).replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
+  '\n;({RECTANGULAR_OBSTACLE_TYPE,CIRCULAR_OBSTACLE_TYPE,OBSTACLE_COMPONENT_TYPES,MIN_CIRCLE_RADIUS,getCircleRadius,RESIZABLE_COMPONENT_TYPES,DEFAULT_COMPONENT_SHADOW_COLORS,DEFAULT_COMPONENT_SIZES,getDefaultShadowColor})', {...triangle, ...rectangularWall});
+const stations = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/stations.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
+  '\n;({ STATION_TYPES, DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns })', {...triangle, ...componentAppearance, ...rectangularWall});
+const canvasBoundaryUtils = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/canvasBoundary.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') +
+  '\n;({clampCanvasOffset,clampCanvasPoint,encloseCanvasBounds,fitsCanvasBounds,getCanvasItemBounds,getCanvasMoveBounds,getCanvasSizeError})',
+{...stations, ...agvGeometry});
+const componentCollision = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/componentCollision.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') +
+  '\n;({distanceToCollisionFootprint,getCollisionFootprint,footprintsOverlap,hasComponentCollision,hasTriangleVertexSweepCollision,resolveComponentDrag})',
+{...stations, ...triangle, ...componentAppearance, ...rectangularWall});
 const componentPorts = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/componentPorts.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') +
@@ -57,10 +77,14 @@ const connectionGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/connectionLine.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export (const|function) /g, '$1 ') +
   '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry,getPointOnConnection,getConnectionSegmentMove})', {...stations, ...componentPorts, ...agvGeometry});
+const hasWallRouteCollision = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/wallRoutes.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') + '\n;hasWallRouteCollision',
+{...agvGeometry, ...connectionGeometry, ...componentCollision, ...rectangularWall});
 
 // Run the actual component handlers with Vue reactivity and a small DOM/canvas stub.
 // No test-only exports or alternate coordinate implementation are added to production.
-function createCanvas(items = [], onPlacementDone) {
+function createCanvas(items = [], onPlacementDone, handlers = {}) {
   const mounted = [];
   const cleanup = [];
   const frames = new Map();
@@ -77,10 +101,14 @@ function createCanvas(items = [], onPlacementDone) {
     setPointerCapture() {},
   });
   const container = vue.markRaw({ clientWidth: 1000, clientHeight: 600 });
-  const props = vue.reactive({ placedComponents: items, activeControl: null, selectedId: null, selectedIds: [] });
+  const props = vue.reactive({ placedComponents: items, activeControl: null, selectedId: null, selectedIds: [], canvasBoundary: null });
   const events = [];
   const emit = (type, value) => {
     events.push({ type, value });
+    if (handlers[type]) {
+      handlers[type](value);
+      return;
+    }
     if (type === 'component-placed') props.placedComponents.push(value);
     if (type === 'placement-done') onPlacementDone?.();
     if (type === 'select-component') {
@@ -109,7 +137,11 @@ function createCanvas(items = [], onPlacementDone) {
   const sandbox = {
     ...agvGeometry,
     ...stations,
+    ...canvasBoundaryUtils,
+    ...componentCollision,
     ...componentAppearance,
+    ...triangle,
+    ...rectangularWall, hasWallRouteCollision,
     ...componentPorts,
     ...connectionGeometry,
     alignBounds,
@@ -132,10 +164,10 @@ function createCanvas(items = [], onPlacementDone) {
   };
   const script = descriptor.scriptSetup.content.replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?$/gm, '');
   const exports = `({ canvas, canvasContainer, ppm, viewOrigin, canvasWidth, canvasHeight,
-    alignmentGuides, cursorX, cursorY,
+    alignmentGuides, cursorX, cursorY, cursorStyle,
     metersPerCell, panning, selectionBox, isComponentSelected, imageCache, handleWheel, resetZoom, focusComponent,
     handleMouseDown, handleMouseMove, handleMouseUp, handleMouseEnter, handleMouseLeave,
-    handleCanvasKeyDown, handlePointerCancel, handleWindowBlur, getCanvasMousePosition,
+    handleCanvasKeyDown, handlePointerCancel, handleWindowBlur, getCanvasMousePosition, undoDraftPoint, finishCanvasDrag,
     drawGridNow, drawWorkpieces, hitTestWorkpiece, workpieceTooltipAnchor, dragging, draggingCorner, editingId, labelRects, labelEditorStyle,
     hitTestComponent, hitTestLabel, connectionScreenPoint, hitTestConnectionLine, hitTestAGVPath,
   })`;
@@ -407,7 +439,7 @@ test('AGV properties change width, reverse endpoints, and keep station links wor
   near(route.nodes[2].x, -1); near(route.nodes[2].y, -2);
 });
 
-test('AGV path drawing creates straight corridors through clicked waypoints', async (t) => {
+test('AGV path drawing creates straight corridors and can undo a draft waypoint', async (t) => {
   const stationsAt = [
     { id: 'start', type: 'node', name: '停靠站点', index: 1, x: 0, y: 0, width: 3, height: 3 },
     { id: 'end', type: 'node', name: '停靠站点', index: 2, x: 10, y: 10, width: 3, height: 3 },
@@ -418,10 +450,13 @@ test('AGV path drawing creates straight corridors through clicked waypoints', as
   assert.doesNotMatch(descriptor.template.content, /agvDrawingMode|arcDrawingRadius|圆弧/);
   await c.api.handleMouseDown(c.pointer(0, 0));
   await c.api.handleMouseDown(c.pointer(10, 0));
+  await c.api.handleMouseDown(c.pointer(12, 5));
+  assert.equal(c.api.undoDraftPoint(), true);
   await c.api.handleMouseDown(c.pointer(10, 10));
   const path = c.props.placedComponents.find((item) => item.type === 'AGVpath');
   assert.ok(path);
   assert.equal(path.fromId, 'start'); assert.equal(path.toId, 'end');
+  assert.deepEqual(Array.from(path.nodes, ({x, y}) => [x, y]), [[0, 0], [10, 0], [10, 10]]);
   assert.equal(path.cornerRadii, undefined);
   assert.equal(agvGeometry.buildPathGeometry(path).some((segment) => segment.type === 'arc'), false);
 });
@@ -464,11 +499,14 @@ test('ordinary connections require a port to finish, can cancel over the port an
   await click(12, 0);
   await click(9, 5);
   await click(4, 3);
+  await click(2, 7);
+  assert.equal(c.api.undoDraftPoint(), true);
   await click(0, 0);
   assert.equal(links().length, 1);
   const [line] = links();
   assert.deepEqual([line.fromId, line.toId], ['source', 'sink']);
   assert.deepEqual(Array.from(line.waypoints, point => [point.x, point.y]), [[4, 3], [9, 5]]);
+  assert.equal(c.api.undoDraftPoint(), false);
 });
 
 test('dragging an ordinary arc selects the line and resets its radius without moving the ports', async (t) => {
@@ -763,7 +801,7 @@ for (const scale of [10, 100, 1000]) {
 test('Shift direction lock prevents alignment from moving the locked axis', async (t) => {
   const c = createCanvas([
     buffer({ x: -10, y: 0 }),
-    buffer({ id: 'reference', x: -0.025, y: 0.2 }),
+    buffer({ id: 'reference', x: -0.025, y: 3.2 }),
   ]); t.after(() => c.dispose());
   await c.api.handleMouseDown(c.pointer(-9, 1));
   c.api.handleMouseMove(c.pointer(0.9, 1.1, { shiftKey: true }));
@@ -1072,9 +1110,9 @@ test('fit-all includes distant components and AGV bends without changing the mod
 });
 
 test('screen quadrants map to signed physical coordinates; buffers and stations can be placed in all four', async (t) => {
-  const c = createCanvas(); t.after(() => c.dispose());
-  c.api.imageCache.set('buffer.svg', { complete: true });
   for (const type of ['buffer', 'node']) {
+    const c = createCanvas(); t.after(() => c.dispose());
+    c.api.imageCache.set('buffer.svg', {complete: true});
     c.props.activeControl = { type, name: type, icon: 'buffer.svg' };
     await vue.nextTick();
     for (const [dx, dy] of [[100, -100], [-100, -100], [-100, 100], [100, 100], [0, 0]]) {
@@ -1089,8 +1127,8 @@ test('screen quadrants map to signed physical coordinates; buffers and stations 
       near(center.y, -dy / 10);
       assert.equal(placed.type, type);
     }
+    assert.equal(c.props.placedComponents.length, 5);
   }
-  assert.equal(c.props.placedComponents.length, 10);
 });
 
 test('a buffer can cross both axes while dragging and retains signed coordinates in movement logs', async (t) => {
@@ -1151,7 +1189,11 @@ function loadComponent(name, bindings, exposed) {
   return vm.runInNewContext(`${script}\n;({ ${exposed} })`, {
     ...agvGeometry,
     ...stations,
+    ...canvasBoundaryUtils,
+    ...componentCollision,
     ...componentAppearance,
+    ...triangle,
+    ...rectangularWall, hasWallRouteCollision,
     ...componentPorts,
     ...inputRules, ...workstationProperties, ...assemblyRecipes, ...disassemblyRecipes, ...bufferProperties, ...connectionGeometry,
     createInputSimulation, createBootstrapTooltipDirective: () => ({}),
@@ -1223,6 +1265,681 @@ const shortcuts = {
   ...loadExports('config/shortcuts.js', 'shortcutBindings,shortcutLabels'),
   ...loadExports('utils/shortcuts.js', 'installShortcuts,loadShortcutBindings,saveShortcutBindings,formatShortcutBinding,normalizeShortcutBinding'),
 };
+
+test('finite canvas keeps the same viewport and shades only outside the world-space boundary', async (t) => {
+  const c = createCanvas();
+  t.after(() => c.dispose());
+  const backingSize = [c.element.width, c.element.height];
+  const ctx = c.element.getContext();
+  let rects = [];
+  let mask;
+  ctx.beginPath = () => { rects = []; };
+  ctx.rect = (...rect) => rects.push(rect);
+  ctx.fill = rule => { if (rule === 'evenodd') mask = rects; };
+  c.api.drawGridNow();
+  assert.equal(mask, undefined);
+  c.props.canvasBoundary = {x: -10, y: -6, width: 20, height: 12};
+  c.api.drawGridNow();
+  assert.deepEqual(mask, [[0, 0, 1000, 600], [400, 240, 200, 120]]);
+  assert.deepEqual([c.element.width, c.element.height], backingSize);
+  await c.api.handleMouseDown(c.pointer(0, 0, {button: 1}));
+  c.api.handleMouseMove(c.pointer(5, -2));
+  c.api.handleMouseUp();
+  c.api.drawGridNow();
+  assert.deepEqual(mask[1], [450, 260, 200, 120]);
+});
+
+test('rectangular obstacle hatching fills its footprint at every zoom with constant pixel spacing', (t) => {
+  const obstacle = buffer({id: 'pillar', type: 'rectangularObstacle', icon: 'rectangularObstacle.svg',
+    x: -3, y: -2, width: 6, height: 4});
+  const canvas = createCanvas([obstacle]);
+  t.after(() => canvas.dispose());
+  canvas.api.imageCache.set(obstacle.icon, {complete: true});
+  canvas.props.selectedId = obstacle.id;
+  const ctx = canvas.element.getContext();
+  let path;
+  let hatches;
+  let outline;
+  let icons = 0;
+  let corners = [];
+  ctx.beginPath = () => { path = []; };
+  ctx.moveTo = (x, y) => path.push([x, y]);
+  ctx.lineTo = (x, y) => path.push([x, y]);
+  ctx.stroke = () => {
+    if (ctx.strokeStyle === '#64748b') hatches = {path, lineWidth: ctx.lineWidth};
+  };
+  ctx.strokeRect = (...bounds) => { outline = bounds; };
+  ctx.drawImage = () => { icons++; };
+  ctx.arc = (x, y, radius) => corners.push([x, y, radius]);
+  const render = scale => {
+    canvas.api.ppm.value = scale;
+    canvas.api.viewOrigin.value = {x: -canvas.api.canvasWidth.value / (2 * scale), y: canvas.api.canvasHeight.value / (2 * scale)};
+    corners = [];
+    canvas.api.drawGridNow();
+    assert.deepEqual(outline, [-3 * scale, -2 * scale, 6 * scale, 4 * scale]);
+    assert.deepEqual(corners, [[-3 * scale, -2 * scale, 3.5], [-3 * scale, 2 * scale, 3.5],
+      [3 * scale, -2 * scale, 3.5], [3 * scale, 2 * scale, 3.5]]);
+    assert.equal(hatches.lineWidth, 1);
+    near((hatches.path[2][0] - hatches.path[0][0]) / Math.SQRT2, 8);
+    near(hatches.path[1][0] - hatches.path[0][0], -(hatches.path[1][1] - hatches.path[0][1]));
+    return hatches.path.length;
+  };
+  const normalCount = render(10);
+  assert.ok(render(20) > normalCount);
+  canvas.props.selectedId = null;
+  corners = [];
+  canvas.api.drawGridNow();
+  assert.equal(corners.length, 0);
+  assert.equal(icons, 0);
+  assert.equal(componentPorts.getComponentPorts(obstacle).length, 0);
+});
+
+test('triangle definitions require a unique solution and keep the edge numbering from the diagram', () => {
+  const combinations = [
+    {side1: 3, side2: 4, side3: 5},
+    {side1: 3, side2: 4, angleA: 90},
+    {side3: 5, angleA: 90, angleB: Math.atan2(4, 3) * 180 / Math.PI},
+    {side1: 3, side3: 5, angleA: 90},
+  ];
+  for (const fields of combinations) {
+    const {parameters} = triangle.solveTriangle(fields);
+    near(parameters.side1, 3);
+    near(parameters.side2, 4);
+    near(parameters.side3, 5);
+    near(parameters.angleA, 90);
+  }
+  assert.match(triangle.solveTriangle({side1: 2, side2: 3, side3: 5}).error, /无法构成/);
+  assert.match(triangle.solveTriangle({side1: 3, side2: 4, side3: 5, angleA: 80}).error, /无法构成/);
+  assert.match(triangle.solveTriangle({angleA: 60, angleB: 60, angleC: 60}).hint, /边长/);
+  assert.match(triangle.solveTriangle({side3: 7, side2: 9, angleA: 40}).hint, /两组解/);
+  assert.ok(triangle.solveTriangle({side3: 7, side2: 9, angleA: 40, angleB: 55.734881}).vertices);
+  near(triangle.solveTriangle({side3: 5, side2: 10, angleA: 30}).parameters.angleB, 90);
+});
+
+test('triangle canvas placement, vertex drag and definition share the property model and undo history', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentPosition, beginCanvasEdit, endCanvasEdit, undoCanvasEdit, openDialog, saveDialog, activeDialog, getTriangleDefinitionError, finiteCanvas');
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {
+    'component-placed': workspace.handleComponentPlaced,
+    'update-component-position': workspace.handleUpdateComponentPosition,
+    'canvas-drag-start': workspace.beginCanvasEdit,
+    'canvas-drag-end': workspace.endCanvasEdit,
+  });
+  t.after(() => canvas.dispose());
+  canvas.props.activeControl = {type: 'triangularObstacle', name: '三角形障碍物', icon: 'triangularObstacle.svg'};
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, 0, {altKey: true}));
+  canvas.api.handleMouseUp();
+  const [item] = workspace.placedComponents.value;
+  const vertices = () => Array.from(triangle.getTriangleVertices(workspace.placedComponents.value[0]), point => ({...point}));
+  const original = vertices();
+  assert.equal(canvas.api.hitTestComponent(-1.4, 1), null, 'empty footprint corner stays selectable as canvas');
+  assert.equal(canvas.api.hitTestComponent(0, 0).id, item.id);
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({get selectedItem() { return workspace.placedComponents.value[0]; }}),
+  }, 'triangleParameters');
+  near(panel.triangleParameters.value.side1, 3);
+  near(panel.triangleParameters.value.angleA, 60);
+  canvas.props.activeControl = null;
+  canvas.props.selectedId = item.id;
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, original[1].y));
+  canvas.api.handleMouseMove(canvas.pointer(0, -5));
+  canvas.api.handleMouseUp();
+  assert.deepEqual(vertices(), original, 'selected edge is fixed');
+  await canvas.api.handleMouseDown(canvas.pointer(original[0].x, original[0].y));
+  canvas.api.handleMouseMove(canvas.pointer(1, 4));
+  canvas.api.handleMouseUp();
+  near(vertices()[0].x, 1);
+  assert.deepEqual(vertices().slice(1), original.slice(1));
+  assert.notEqual(panel.triangleParameters.value.angleA, 60);
+  workspace.undoCanvasEdit();
+  assert.deepEqual(vertices(), original);
+
+  const center = stations.getComponentCenter(workspace.placedComponents.value[0]);
+  workspace.finiteCanvas.value = {enabled: true, length: 10, width: 10};
+  workspace.openDialog({itemId: item.id, dialogType: 'triangle-definition'});
+  const dialog = loadComponent('Dialog', {
+    defineProps: () => ({
+      item: workspace.placedComponents.value[0],
+      dialogType: 'triangle-definition',
+      validateTriangle: workspace.getTriangleDefinitionError,
+    }),
+    defineEmits: () => (_, payload) => workspace.saveDialog(payload),
+    systemInputIcon: '',
+    window: {innerWidth: 1200, innerHeight: 800},
+  }, 'triangleDraft, triangleSolution, triangleError, saveTriangleDefinition');
+  dialog.saveTriangleDefinition();
+  assert.ok(workspace.activeDialog.value);
+  Object.assign(dialog.triangleDraft, {side1: 30, side2: 40, angleA: 90});
+  assert.match(dialog.triangleError.value, /超出有限画布/);
+  dialog.saveTriangleDefinition();
+  assert.ok(workspace.activeDialog.value);
+  Object.assign(dialog.triangleDraft, {side1: 3, side2: 4});
+  near(dialog.triangleSolution.value.parameters.side3, 5);
+  dialog.saveTriangleDefinition();
+  assert.equal(workspace.activeDialog.value, null);
+  near(panel.triangleParameters.value.angleA, 90);
+  assert.deepEqual(stations.getComponentCenter(workspace.placedComponents.value[0]), center);
+});
+
+test('triangular footprints allow use of empty bounding-box corners and block swept collisions', () => {
+  const obstacle = {id: 'obstacle', type: 'triangularObstacle', x: 0, y: 0};
+  const rect = buffer({id: 'device', x: 0, y: 2, width: 0.4, height: 0.4});
+  const triangleBounds = componentCollision.getCollisionFootprint(obstacle);
+  const rectBounds = componentCollision.getCollisionFootprint(rect);
+  assert.equal(componentCollision.footprintsOverlap(triangleBounds, rectBounds), false);
+  const traveled = componentCollision.resolveComponentDrag([rectBounds], [triangleBounds], {x: 4, y: 0});
+  near(traveled.x, 2 / Math.sqrt(3) - 0.4);
+  assert.equal(componentCollision.hasTriangleVertexSweepCollision([obstacle, rect], obstacle, 0, {x: -3, y: 1.9}), true);
+});
+
+test('circular obstacles draw a round outline and resize around their center through both editing paths', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentProperties, handleResizeObstacleEdge, beginCanvasEdit, endCanvasEdit, undoCanvasEdit, finiteCanvas');
+  workspace.handleComponentPlaced(buffer({id: 'block', x: 3, y: -1, width: 2, height: 2}));
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {
+    'component-placed': workspace.handleComponentPlaced,
+    'resize-obstacle-edge': workspace.handleResizeObstacleEdge,
+    'canvas-drag-start': workspace.beginCanvasEdit,
+    'canvas-drag-end': workspace.endCanvasEdit,
+  });
+  t.after(() => canvas.dispose());
+  canvas.props.activeControl = {type: 'circularObstacle', name: '圆形障碍物', icon: 'circularObstacle.svg'};
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, 0, {altKey: true}));
+  canvas.api.handleMouseUp();
+  const circle = workspace.placedComponents.value[1];
+  assert.deepEqual([circle.width, circle.height], [3, 3]);
+  assert.equal(canvas.api.hitTestComponent(1.4, 1.4), null);
+  assert.equal(canvas.api.hitTestComponent(0, 1).id, circle.id);
+
+  canvas.props.activeControl = null;
+  canvas.props.selectedId = circle.id;
+  await vue.nextTick();
+  const arcs = [];
+  canvas.element.getContext().arc = (x, y, radius) => arcs.push([x, y, radius]);
+  canvas.api.drawGridNow();
+  assert.ok(arcs.some(([x, y, radius]) => x === 0 && y === 0 && radius === 1.5 * canvas.api.ppm.value));
+  assert.equal(arcs.filter(([, , radius]) => radius === 3.5).length, 4);
+  assert.equal(canvas.api.imageCache.has(circle.icon), false);
+
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({get selectedItem() { return workspace.placedComponents.value[1]; }}),
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'circleRadius, handleCircleRadiusBlur');
+  const setRadius = value => {
+    const target = {value};
+    panel.handleCircleRadiusBlur({target});
+    return target.value;
+  };
+  assert.equal(setRadius('2'), '2');
+  assert.equal(setRadius('0'), '2');
+  assert.equal(setRadius('3.1'), '2');
+  await canvas.api.handleMouseDown(canvas.pointer(2, 0));
+  canvas.api.handleMouseMove(canvas.pointer(4, 0));
+  canvas.api.handleMouseUp();
+  near(panel.circleRadius.value, 3);
+  assert.deepEqual({...stations.getComponentCenter(circle)}, {x: 0, y: 0});
+  workspace.undoCanvasEdit();
+  near(panel.circleRadius.value, 2);
+
+  workspace.finiteCanvas.value = {enabled: true, length: 12, width: 5};
+  assert.equal(setRadius('2.6'), '2');
+  assert.equal(setRadius('2.5'), '2.5');
+});
+
+test('circular collision uses the exact outline and stops at the first contact between shapes', () => {
+  const {footprintsOverlap, getCollisionFootprint, resolveComponentDrag} = componentCollision;
+  const disk = getCollisionFootprint({type: 'circularObstacle', x: -1, y: -1, width: 2, height: 2});
+  assert.equal(footprintsOverlap(disk, {x: 0.8, y: 0.8, width: 1, height: 1}), false);
+  assert.equal(footprintsOverlap(disk, {x: 0.6, y: 0.6, width: 1, height: 1}), true);
+  const otherDisk = {...disk, x: 4, y: 0};
+  const rectangle = {x: 4, y: 0.6, width: 1, height: 2};
+  const triangleBounds = getCollisionFootprint({type: 'triangularObstacle', x: 5, y: 0});
+  near(resolveComponentDrag([disk], [otherDisk], {x: 10, y: 0}).x, 5 - Math.sqrt(3));
+  near(resolveComponentDrag([disk], [rectangle], {x: 10, y: 0}).x, 3.2);
+  near(resolveComponentDrag([rectangle], [disk], {x: -10, y: 0}).x, -3.2);
+  near(resolveComponentDrag([{...rectangle, width: 0}], [disk], {x: -10, y: 0}).x, -3.2);
+  near(resolveComponentDrag([{...disk, y: 0}], [triangleBounds], {x: 10, y: 0}).x, 5 - 1 / Math.sqrt(3));
+  assert.equal(footprintsOverlap(disk, {...disk, x: 1}), false, 'touching circles do not overlap');
+});
+
+test('rectangular wall thickness and exits use the inner frame while collisions use only solid strips', () => {
+  const {getWallGeometry, getWallSideOptions, getWallValidationError} = rectangularWall;
+  const {getCollisionFootprint, footprintsOverlap, resolveComponentDrag} = componentCollision;
+  const wall = {id: 'wall', type: 'rectangularWall', x: 0, y: 0, width: 40, height: 24, wallThickness: 1};
+  const shape = getWallGeometry(wall);
+  assert.deepEqual({...shape.outer}, {x: -1, y: -1, width: 42, height: 26});
+  assert.deepEqual({...shape.exitPoints[0]}, {x: 5, y: 24});
+  assert.deepEqual({...getWallGeometry({...wall, wallThicknessMode: 'centered'}).exitPoints[0]}, {x: 5.5, y: 23.5});
+  assert.deepEqual({...getWallGeometry({...wall, wallThicknessMode: 'inside'}).exitPoints[0]}, {x: 6, y: 23});
+  assert.deepEqual(Array.from(getWallSideOptions('top'), side => side.value), ['left', 'right']);
+  assert.deepEqual(Array.from(getWallSideOptions('right'), side => side.value), ['top', 'bottom']);
+  assert.equal(getWallSideOptions('').length, 4);
+  assert.match(getWallValidationError({...wall, wallThickness: 13, wallThicknessMode: 'inside'}), /内部空间/);
+  assert.match(getWallValidationError({...wall, wallExits: [
+    {side: 'bottom', reference: 'right', width: 4, distance: 4},
+    {side: 'bottom', reference: 'right', width: 4, distance: 6},
+  ]}), /重叠/);
+  const wallFootprint = getCollisionFootprint(wall);
+  const box = {x: 4.5, y: 21, width: 1, height: 1};
+  assert.equal(footprintsOverlap(box, wallFootprint), false);
+  assert.equal(footprintsOverlap({...box, x: 10, y: 24}, wallFootprint), true);
+  near(resolveComponentDrag([box], [wallFootprint], {x: 0, y: 8}).y, 8);
+  near(resolveComponentDrag([{...box, x: 10}], [wallFootprint], {x: 0, y: 8}).y, 2);
+});
+
+test('wall placement and the exit editor update the same model and support undo', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentProperties, openDialog, activeDialog, saveDialog, validateWallExits, undoCanvasEdit');
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {'component-placed': workspace.handleComponentPlaced});
+  t.after(() => canvas.dispose());
+  canvas.props.activeControl = {type: 'rectangularWall', name: '矩形墙', icon: 'rectangularWall.svg'};
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, 0, {altKey: true}));
+  const [wall] = workspace.placedComponents.value;
+  assert.deepEqual([wall.width, wall.height, wall.wallThickness, wall.wallThicknessMode], [40, 24, 0.3, 'outside']);
+  assert.equal(canvas.api.hitTestComponent(0, 0), null);
+  assert.equal(canvas.api.hitTestComponent(0, 12.15).id, wall.id);
+  assert.equal(canvas.api.hitTestComponent(-15, 12.15), null);
+  const ctx = canvas.element.getContext();
+  const markers = [];
+  ctx.arc = (x, y, radius) => markers.push([x, y, radius]);
+  canvas.api.drawGridNow();
+  assert.ok(markers.some(([x, y, radius]) => x === -15 * canvas.api.ppm.value && y === -12 * canvas.api.ppm.value && radius === 3));
+
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: wall}),
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'handleWallNumber, handleWallThicknessMode');
+  panel.handleWallNumber('width', {target: {value: '50'}});
+  panel.handleWallNumber('wallThickness', {target: {value: '1'}});
+  panel.handleWallThicknessMode({target: {value: 'inside'}});
+  assert.deepEqual([wall.width, wall.wallThickness, wall.wallThicknessMode], [50, 1, 'inside']);
+  assert.deepEqual({...stations.getComponentCenter(wall)}, {x: 0, y: 0});
+
+  workspace.openDialog({itemId: wall.id, dialogType: 'wall-exits'});
+  const editor = loadComponent('WallExitDialog', {
+    defineProps: () => ({wall, validate: workspace.validateWallExits}),
+    defineEmits: () => (_, payload) => workspace.saveDialog(payload),
+  }, 'rows, addRow, removeRow, save, validationError');
+  editor.addRow();
+  editor.save();
+  assert.ok(editor.validationError.value);
+  assert.equal(wall.wallExits.length, 1);
+  editor.removeRow();
+  editor.addRow();
+  Object.assign(editor.rows.value[1], {side: 'left', reference: 'top', width: 2, distance: 4});
+  editor.save();
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(wall.wallExits.length, 2);
+  workspace.undoCanvasEdit();
+  assert.equal(workspace.placedComponents.value[0].wallExits.length, 1);
+});
+
+test('wall crossings accept openings that fit and reject solid-wall and rounded-route intersections', () => {
+  const wall = {id: 'wall', type: 'rectangularWall', x: 0, y: 0, width: 40, height: 24};
+  const from = buffer({id: 'inside', x: 4.5, y: 19.5, width: 1, height: 1});
+  const to = buffer({id: 'outside', x: 9.5, y: 24.5, width: 1, height: 1});
+  const waypoint = {x: 5, y: 25};
+  const connection = {id: 'line', type: 'connectionLine', fromId: from.id, toId: to.id, waypoints: [waypoint]};
+  const agv = {id: 'agv', type: 'AGVpath', pathWidth: 1, nodes: [{x: 5, y: 20}, waypoint, {x: 10, y: 25}]};
+  const straightAgv = {...agv, nodes: [{x: 5, y: 20}, {x: 5, y: 28}]};
+  const scene = [wall, from, to];
+  assert.equal(hasWallRouteCollision(scene, [connection]), false);
+  assert.equal(hasWallRouteCollision(scene, [{...connection, waypoints: []}]), true);
+  assert.equal(hasWallRouteCollision(scene, [{...connection, cornerRadii: [4]}]), true);
+  assert.equal(hasWallRouteCollision(scene, [agv]), false);
+  assert.equal(hasWallRouteCollision(scene, [{...straightAgv, pathWidth: 3}]), false);
+  assert.equal(hasWallRouteCollision(scene, [{...straightAgv, pathWidth: 3.01}]), true);
+  assert.equal(hasWallRouteCollision(scene, [{...agv, cornerRadii: [4]}]), true);
+  assert.equal(hasWallRouteCollision([...scene, connection, agv], [{...wall, wallExits: []}]), true);
+});
+
+test('rectangular obstacles can be placed and resized using the same physical collision footprint', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentPosition, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'buffer', x: 4, y: -1.5}));
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {'component-placed': workspace.handleComponentPlaced});
+  t.after(() => canvas.dispose());
+  canvas.props.activeControl = {type: 'rectangularObstacle', name: '矩形障碍物', icon: 'rectangularObstacle.svg'};
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, 0, {altKey: true}));
+  const obstacle = workspace.placedComponents.value[1];
+  assert.deepEqual([obstacle.width, obstacle.height], [3, 3]);
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: obstacle}),
+    defineEmits: () => (_, update) => workspace.handleUpdateComponentProperties(update),
+  }, 'isResizableComponent, handleDimensionChange, rotateSelectedComponent');
+  assert.equal(panel.isResizableComponent.value, true);
+  panel.handleDimensionChange('width', {target: {value: '8'}});
+  assert.equal(obstacle.width, 8, 'the obstacle can touch the buffer');
+  panel.handleDimensionChange('width', {target: {value: '9'}});
+  assert.equal(obstacle.width, 8, 'an intersecting resize is rejected');
+  panel.rotateSelectedComponent(1);
+  const footprint = stations.getComponentFootprint(obstacle);
+  assert.deepEqual([footprint.x, footprint.y, footprint.width, footprint.height], [-1.5, -4, 3, 8]);
+});
+
+test('a selected obstacle edge resizes a rotated footprint up to contact and undo restores the entire drag', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, canvasBoundary, handleComponentPlaced, ' +
+    'handleFiniteCanvasToggle, saveDialog, handleResizeObstacleEdge, beginCanvasEdit, endCanvasEdit, undoCanvasEdit');
+  workspace.handleFiniteCanvasToggle({target: {checked: true}});
+  workspace.saveDialog({dialogType: 'finite-canvas', canvasSize: {length: 20, width: 16}});
+  workspace.handleComponentPlaced(buffer({id: 'buffer', x: 3, y: -1, width: 2, height: 2}));
+  workspace.handleComponentPlaced(buffer({id: 'pillar', type: 'rectangularObstacle', x: -2, y: -1, width: 4, height: 2, quarterTurns: 1}));
+  const items = workspace.placedComponents.value;
+  const obstacle = items[1];
+  const canvas = createCanvas(items, undefined, {
+    'canvas-drag-start': workspace.beginCanvasEdit,
+    'canvas-drag-end': workspace.endCanvasEdit,
+    'resize-obstacle-edge': workspace.handleResizeObstacleEdge,
+  });
+  t.after(() => canvas.dispose());
+  canvas.props.canvasBoundary = workspace.canvasBoundary.value;
+  canvas.props.selectedId = obstacle.id;
+  const box = () => ({...stations.getComponentFootprint(obstacle)});
+  canvas.api.handleMouseMove(canvas.pointer(1.2, 0));
+  assert.equal(canvas.api.cursorStyle.value, 'ew-resize');
+  await canvas.api.handleMouseDown(canvas.pointer(1.2, 0));
+  canvas.api.handleMouseMove(canvas.pointer(1.2, 3));
+  assert.deepEqual(box(), {x: -1, y: -2, width: 2, height: 4});
+  canvas.api.handleMouseMove(canvas.pointer(2.2, 0));
+  assert.deepEqual(box(), {x: -1, y: -2, width: 3, height: 4});
+  canvas.api.handleMouseMove(canvas.pointer(15, 0));
+  canvas.api.handleMouseUp();
+  assert.deepEqual(box(), {x: -1, y: -2, width: 4, height: 4});
+
+  workspace.undoCanvasEdit();
+  assert.deepEqual({...stations.getComponentFootprint(workspace.placedComponents.value[1])}, {x: -1, y: -2, width: 2, height: 4});
+});
+
+test('obstacle corners are visual only and the other three edges preserve the rectangle and clamp at the canvas', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, canvasBoundary, handleComponentPlaced, ' +
+    'handleFiniteCanvasToggle, saveDialog, handleResizeObstacleEdge');
+  workspace.handleFiniteCanvasToggle({target: {checked: true}});
+  workspace.saveDialog({dialogType: 'finite-canvas', canvasSize: {length: 16, width: 12}});
+  workspace.handleComponentPlaced(buffer({id: 'obstacle', type: 'rectangularObstacle', x: -2, y: -2, width: 4, height: 4}));
+  const [obstacle] = workspace.placedComponents.value;
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {'resize-obstacle-edge': workspace.handleResizeObstacleEdge});
+  t.after(() => canvas.dispose());
+  canvas.props.canvasBoundary = workspace.canvasBoundary.value;
+  canvas.props.selectedId = obstacle.id;
+  const drag = async (start, end) => {
+    await canvas.api.handleMouseDown(canvas.pointer(...start));
+    canvas.api.handleMouseMove(canvas.pointer(...end));
+    canvas.api.handleMouseUp();
+  };
+  await drag([2, 2], [5, 5]);
+  assert.deepEqual([obstacle.x, obstacle.y, obstacle.width, obstacle.height], [-2, -2, 4, 4]);
+  assert.equal(canvas.events.some(event => event.type === 'resize-obstacle-edge' || event.type === 'update-component-position'), false);
+  await drag([-2, 0], [-20, 1]);
+  assert.deepEqual([obstacle.x, obstacle.y, obstacle.width, obstacle.height], [-8, -2, 10, 4]);
+  canvas.api.handleMouseMove(canvas.pointer(0, 2));
+  assert.equal(canvas.api.cursorStyle.value, 'ns-resize');
+  await drag([0, 2], [1, 8]);
+  assert.deepEqual([obstacle.y, obstacle.height], [-2, 8]);
+  await drag([0, -2], [0, 10]);
+  near(obstacle.height, 0.01);
+  near(obstacle.y + obstacle.height, 6);
+});
+
+test('components can be placed against a finite boundary and a rotated group slides along the boundary', async (t) => {
+  const rotated = buffer({id: 'turn', x: -3, y: -1, width: 6, height: 2, quarterTurns: 1});
+  const neighbor = buffer({id: 'other', x: 4, y: -1});
+  const c = createCanvas([rotated, neighbor]);
+  t.after(() => c.dispose());
+  c.props.canvasBoundary = {x: -10, y: -8, width: 20, height: 16};
+  c.props.selectedId = 'turn';
+  c.props.selectedIds = ['turn', 'other'];
+  await c.api.handleMouseDown(c.pointer(0, 0));
+  c.api.handleMouseMove(c.pointer(-35, 2, {altKey: true}));
+  let footprint = stations.getComponentFootprint(rotated);
+  assert.deepEqual([footprint.x, footprint.y, neighbor.x, neighbor.y], [-10, -1, -5, 1]);
+  c.api.handleMouseMove(c.pointer(-35, 4, {altKey: true}));
+  footprint = stations.getComponentFootprint(rotated);
+  assert.deepEqual([footprint.x, footprint.y, neighbor.x, neighbor.y], [-10, 1, -5, 3]);
+  c.api.handleMouseUp();
+
+  c.props.activeControl = {type: 'buffer', name: '缓冲区', icon: 'buffer.svg'};
+  await vue.nextTick();
+  await c.api.handleMouseDown(c.pointer(11, 7));
+  assert.equal(c.props.placedComponents.length, 2);
+  c.api.handleMouseMove(c.pointer(9.8, 7.7, {altKey: true}));
+  assert.deepEqual([c.api.cursorX.value, c.api.cursorY.value], [8.5, 6.5]);
+  await c.api.handleMouseDown(c.pointer(9.8, 7.7, {altKey: true}));
+  const placed = c.props.placedComponents.at(-1);
+  assert.deepEqual([placed.x, placed.y, placed.width, placed.height], [7, 5, 3, 3]);
+});
+
+test('dragging cannot jump through a component and can slide along its edge', async (t) => {
+  const moving = buffer({id: 'moving', x: -6, y: 0});
+  const obstacle = buffer({id: 'obstacle', x: 0, y: -4, width: 4, height: 14});
+  const c = createCanvas([moving, obstacle]);
+  t.after(() => c.dispose());
+  await c.api.handleMouseDown(c.pointer(-4.5, 1.5));
+  c.api.handleMouseMove(c.pointer(15, 1.5, {altKey: true}));
+  assert.deepEqual([moving.x, moving.y], [-3, 0]);
+  c.api.handleMouseMove(c.pointer(15, 5.5, {altKey: true}));
+  assert.deepEqual([moving.x, moving.y], [-3, 4]);
+  c.api.handleMouseUp();
+});
+
+test('group drag checks each physical footprint, allowing an obstacle between members', async (t) => {
+  const bottom = buffer({id: 'bottom', x: -6, y: 0});
+  const top = buffer({id: 'top', x: -6, y: 10});
+  const gap = buffer({id: 'gap', x: 0, y: 5});
+  const wall = buffer({id: 'wall', x: 5, y: 10});
+  const c = createCanvas([bottom, top, gap, wall]);
+  t.after(() => c.dispose());
+  c.props.selectedIds = [bottom.id, top.id];
+  c.props.selectedId = bottom.id;
+  await c.api.handleMouseDown(c.pointer(-4.5, 1.5));
+  c.api.handleMouseMove(c.pointer(20, 1.5, {altKey: true}));
+  c.api.handleMouseUp();
+  assert.deepEqual([bottom.x, bottom.y, top.x, top.y], [2, 0, 2, 10]);
+});
+
+test('placement and property edits allow touching but reject intersecting footprints', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, handleComponentPlaced, handleUpdateComponentPosition, handleUpdateComponentProperties');
+  workspace.handleComponentPlaced(buffer({id: 'moving', x: 0, y: 0, width: 6, height: 2}));
+  workspace.handleComponentPlaced(buffer({id: 'side', x: 6, y: 0}));
+  workspace.handleComponentPlaced(buffer({id: 'above', x: 2, y: 3}));
+  workspace.handleComponentPlaced(buffer({id: 'rejected', x: 5.9, y: 0}));
+  assert.equal(workspace.placedComponents.value.length, 3);
+
+  const c = createCanvas(workspace.placedComponents.value, undefined, {'component-placed': workspace.handleComponentPlaced});
+  t.after(() => c.dispose());
+  c.props.activeControl = {type: 'buffer', name: '缓冲区', icon: 'buffer.svg'};
+  await vue.nextTick();
+  await c.api.handleMouseDown(c.pointer(1.5, 1, {altKey: true}));
+  assert.equal(c.events.filter(event => event.type === 'component-placed').length, 0);
+  await c.api.handleMouseDown(c.pointer(10.5, 1.5, {altKey: true}));
+  assert.equal(workspace.placedComponents.value.at(-1).x, 9);
+
+  const [item] = workspace.placedComponents.value;
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: item}),
+    defineEmits: () => (type, value) => (type === 'update-component-position'
+      ? workspace.handleUpdateComponentPosition(value) : workspace.handleUpdateComponentProperties(value)),
+  }, 'handleDimensionChange, handleDimensionBlur, handleCenterCoordinateChange, rotateSelectedComponent');
+  const width = {target: {value: '10'}};
+  panel.handleDimensionChange('width', width);
+  panel.handleDimensionBlur('width', width);
+  assert.equal(width.target.value, '6');
+  const center = {target: {value: '5'}};
+  panel.handleCenterCoordinateChange('x', center);
+  assert.equal(center.target.value, '3');
+  panel.rotateSelectedComponent(1);
+  assert.deepEqual([item.x, item.width, item.quarterTurns], [0, 6, undefined]);
+});
+
+test('an already overlapping layout can be separated without increasing the overlap', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentPosition');
+  workspace.placedComponents.value.push(buffer({id: 'left', x: 0, y: 0}), buffer({id: 'right', x: 2, y: 0}));
+  const right = workspace.placedComponents.value[1];
+  workspace.handleUpdateComponentPosition({id: 'right', x: 1, y: 0});
+  assert.equal(right.x, 2);
+  workspace.handleUpdateComponentPosition({id: 'right', x: 2.5, y: 0});
+  assert.equal(right.x, 2.5);
+  workspace.handleUpdateComponentPosition({id: 'right', x: 3, y: 0});
+  assert.equal(right.x, 3);
+});
+
+test('finite canvas stays disabled until the floating size dialog confirms valid dimensions', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, canvasBoundary, canvasSizeSummary, finiteCanvas, activeDialog, minimumCanvasSize, ' +
+    'handleFiniteCanvasToggle, saveDialog, undoCanvasEdit');
+  const openEditor = () => {
+    const target = {checked: true};
+    workspace.handleFiniteCanvasToggle({target});
+    assert.equal(target.checked, false);
+    const dialog = workspace.activeDialog.value;
+    return loadComponent('Dialog', {
+      defineProps: () => ({item: null, dialogType: dialog.dialogType, canvasSize: dialog.canvasSize,
+        get minimumCanvasSize() { return workspace.minimumCanvasSize.value; }}),
+      defineEmits: () => (event, payload) => {
+        if (event === 'save') workspace.saveDialog(payload);
+        if (event === 'close') workspace.activeDialog.value = null;
+      },
+      window: {innerWidth: 1280, innerHeight: 800}, systemInputIcon: '',
+    }, 'canvasSizeDraft, canvasSizeError, saveCanvasSize, emit');
+  };
+  assert.equal(workspace.canvasBoundary.value, null);
+  assert.equal(workspace.canvasSizeSummary.value, '(+∞,+∞)');
+  workspace.placedComponents.value.push(buffer({x: 23, y: 2}));
+  const draft = openEditor();
+  assert.deepEqual({...draft.canvasSizeDraft}, {length: 52, width: 24});
+  draft.canvasSizeDraft.length = 51;
+  assert.match(draft.canvasSizeError.value, /越界/);
+  draft.saveCanvasSize();
+  assert.equal(workspace.canvasBoundary.value, null);
+  draft.emit('close');
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(workspace.finiteCanvas.value.enabled, false);
+  assert.equal(workspace.canvasSizeSummary.value, '(+∞,+∞)');
+
+  const confirmed = openEditor();
+  confirmed.canvasSizeDraft.width = 0;
+  assert.match(confirmed.canvasSizeError.value, /大于 0/);
+  confirmed.canvasSizeDraft.width = 10;
+  confirmed.saveCanvasSize();
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(workspace.finiteCanvas.value.enabled, true);
+  assert.deepEqual({...workspace.canvasBoundary.value}, {x: -26, y: -5, width: 52, height: 10});
+  assert.match(workspace.canvasSizeSummary.value, /^\(52[,，]\s*10\)$/);
+  workspace.handleFiniteCanvasToggle({target: {checked: false}});
+  assert.equal(workspace.canvasBoundary.value, null);
+  workspace.undoCanvasEdit();
+  assert.equal(workspace.finiteCanvas.value.enabled, true);
+  workspace.undoCanvasEdit();
+  assert.equal(workspace.canvasBoundary.value, null);
+  assert.deepEqual([workspace.placedComponents.value[0].x, workspace.placedComponents.value[0].y], [23, 2]);
+});
+
+test('finite canvas guards model edits including component rotation and connected AGV corridors', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleFiniteCanvasToggle, saveDialog, ' +
+    'handleComponentPlaced, handleUpdateComponentPosition, handleUpdateComponentProperties');
+  workspace.handleFiniteCanvasToggle({target: {checked: true}});
+  workspace.saveDialog({dialogType: 'finite-canvas', canvasSize: {length: 20, width: 16}});
+  workspace.handleComponentPlaced({id: 'start', type: 'node', x: 0, y: 0, width: 3, height: 3});
+  workspace.handleComponentPlaced({id: 'end', type: 'node', x: 5, y: 0, width: 3, height: 3});
+  workspace.handleComponentPlaced({id: 'path', type: 'AGVpath', fromId: 'start', toId: 'end', pathWidth: 4,
+    nodes: [{x: 0, y: 0}, {x: 2, y: 2}, {x: 5, y: 0}]});
+  workspace.handleComponentPlaced(buffer({id: 'rect', x: -3, y: 5, width: 6, height: 2}));
+  workspace.handleComponentPlaced(buffer({id: 'outside', x: 9, y: 0}));
+  assert.equal(workspace.placedComponents.value.length, 4);
+  const [, end, path, rect] = workspace.placedComponents.value;
+  workspace.handleUpdateComponentPosition({id: 'end', x: 200, y: 3});
+  assert.deepEqual([end.x, end.y], [8, 3]);
+  assert.deepEqual({...path.nodes[2]}, {x: 8, y: 3});
+  workspace.handleUpdateComponentProperties({id: 'path', pathWidth: 6});
+  assert.equal(path.pathWidth, 4);
+  workspace.handleUpdateComponentProperties({id: 'rect', rotationDelta: 1});
+  workspace.handleUpdateComponentProperties({id: 'rect', height: 5});
+  assert.equal(rect.quarterTurns, undefined);
+  assert.equal(rect.height, 2);
+});
+
+test('Ctrl+Z undoes the last canvas edit while leaving editable controls to handle their own undo', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced, undoCanvasEdit');
+  const target = Object.assign(new EventTarget(), {document: {activeElement: null}, localStorage: {
+    getItem: () => '{"repeat-last-tool":{"button":4}}',
+  }});
+  let mount;
+  let unmount;
+  const app = loadComponent('../App', {
+    ...shortcuts, window: target,
+    onMounted: callback => { mount = callback; },
+    onBeforeUnmount: callback => { unmount = callback; },
+  }, 'workspaceLayoutRef, activeShortcutBindings');
+  app.workspaceLayoutRef.value = workspace;
+  workspace.handleComponentPlaced(buffer({id: 'first'}));
+  workspace.handleComponentPlaced(buffer({id: 'second', x: 15}));
+  mount();
+  assert.equal(app.activeShortcutBindings.value['repeat-last-tool'].button, 4);
+  assert.equal(shortcuts.formatShortcutBinding(app.activeShortcutBindings.value['undo-canvas-edit']), 'Ctrl + Z');
+
+  const press = (modifiers = {}) => {
+    const event = Object.assign(new Event('keydown', {cancelable: true}), {key: 'z', ctrlKey: true, ...modifiers});
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  target.document.activeElement = {closest: selector => selector.includes('input')};
+  assert.equal(press(), false);
+  assert.equal(workspace.placedComponents.value.length, 2);
+  target.document.activeElement = null;
+  assert.equal(press({shiftKey: true}), false);
+  assert.equal(press(), true);
+  assert.deepEqual(Array.from(workspace.placedComponents.value, item => item.id), ['first']);
+  assert.equal(press({repeat: true}), true);
+  assert.equal(workspace.placedComponents.value.length, 1);
+  assert.equal(press(), true);
+  assert.equal(workspace.placedComponents.value.length, 0);
+  unmount();
+});
+
+test('canvas undo groups pointer moves and restores a batch deletion with its connections', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {getComponentLabel: item => item.id},
+    'placedComponents, designCanvas, selectedIds, handleComponentPlaced, handleSelectComponents, handleKeyDown, ' +
+    'handleUpdateComponentPositions, handleUpdateComponentProperties, beginCanvasEdit, endCanvasEdit, undoCanvasEdit');
+  workspace.handleComponentPlaced(buffer({id: 'a', x: 0, y: 0}));
+  workspace.handleComponentPlaced(buffer({id: 'b', x: 10, y: 0}));
+  workspace.handleComponentPlaced({id: 'line', type: 'connectionLine', fromId: 'a', toId: 'b'});
+  workspace.handleSelectComponents(['a', 'b']);
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {
+    'canvas-drag-start': workspace.beginCanvasEdit,
+    'canvas-drag-end': workspace.endCanvasEdit,
+    'update-component-positions': workspace.handleUpdateComponentPositions,
+  });
+  t.after(() => canvas.dispose());
+  canvas.props.selectedIds = ['a', 'b'];
+  canvas.props.selectedId = 'a';
+  workspace.designCanvas.value = canvas.api;
+  const positions = () => Array.from(workspace.placedComponents.value.slice(0, 2), item => [item.x, item.y]);
+  await canvas.api.handleMouseDown(canvas.pointer(1, 1));
+  canvas.api.handleMouseMove(canvas.pointer(3, 4, {altKey: true}));
+  await vue.nextTick();
+  canvas.api.handleMouseMove(canvas.pointer(4, 5, {altKey: true}));
+  canvas.api.handleMouseUp();
+  assert.deepEqual(positions(), [[3, 4], [13, 4]]);
+
+  workspace.handleUpdateComponentProperties({id: 'a', width: 5});
+  workspace.handleUpdateComponentProperties({id: 'a', width: 5});
+  workspace.undoCanvasEdit();
+  assert.equal(workspace.placedComponents.value[0].width, 3);
+  assert.deepEqual(positions(), [[3, 4], [13, 4]]);
+  workspace.undoCanvasEdit();
+  assert.deepEqual(positions(), [[0, 0], [10, 0]]);
+
+  workspace.handleKeyDown({key: 'Delete', preventDefault() {}});
+  assert.equal(workspace.placedComponents.value.length, 0);
+  workspace.undoCanvasEdit();
+  assert.deepEqual(Array.from(workspace.placedComponents.value, item => item.id), ['a', 'b', 'line']);
+  assert.deepEqual(Array.from(workspace.selectedIds.value), ['a', 'b']);
+});
 
 test('the back mouse button restores a finished tool and leaves an active drawing alone', async (t) => {
   const {tabList, menuControls} = loadExports('config/controlMenuData.js', 'tabList,menuControls');
@@ -1298,6 +2015,131 @@ test('the back mouse button restores a finished tool and leaves an active drawin
   assert.equal(panel.activeControlInfo.value.type, 'select');
 });
 
+test('Ctrl+A selects all model objects or the active console tab according to the focused panel', (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {getComponentLabel: item => item.id},
+    'placedComponents, selectedIds, consolePanel, canSelectAll, selectAll, handleSelectComponent, handleKeyDown, undoCanvasEdit');
+  workspace.placedComponents.value.push(
+    buffer({id: 'input'}), buffer({id: 'output'}),
+    {id: 'link', type: 'connectionLine', fromId: 'input', toId: 'output'},
+  );
+  let selectedContent;
+  const doc = {
+    getSelection() {
+      return {
+        removeAllRanges() { selectedContent = null; },
+        addRange(range) { selectedContent = range.content; },
+      };
+    },
+    createRange() {
+      return {selectNodeContents(content) { this.content = content; }};
+    },
+  };
+  const consoleView = loadComponent('ConsolePanel', {defineProps: () => ({logs: []})},
+    'logList, consoleContent, activeTab, selectVisibleContent');
+  consoleView.logList.value = vue.markRaw({ownerDocument: doc});
+  consoleView.consoleContent.value = vue.markRaw({ownerDocument: doc});
+  workspace.consolePanel.value = {selectVisibleContent: consoleView.selectVisibleContent};
+
+  let activePanel = 'model-tree';
+  let editing = false;
+  const target = Object.assign(new EventTarget(), {
+    ownerDocument: doc,
+    localStorage: {getItem: () => null},
+    closest(selector) {
+      if (selector === '[data-workspace-panel]') return {dataset: {workspacePanel: activePanel}};
+      if (editing && selector.includes('input')) return this;
+      return null;
+    },
+  });
+  let mount, unmount;
+  const app = loadComponent('../App', {
+    ...shortcuts, window: target,
+    onMounted: callback => { mount = callback; },
+    onBeforeUnmount: callback => { unmount = callback; },
+  }, 'workspaceLayoutRef');
+  app.workspaceLayoutRef.value = workspace;
+  mount();
+  t.after(unmount);
+  const ctrlA = () => {
+    const event = Object.assign(new Event('keydown', {cancelable: true}), {key: 'a', ctrlKey: true});
+    target.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  assert.equal(ctrlA(), true);
+  assert.deepEqual([...workspace.selectedIds.value], ['input', 'output', 'link']);
+  workspace.handleSelectComponent('input');
+  editing = true;
+  assert.equal(ctrlA(), false, 'the search field keeps native select all');
+  assert.deepEqual([...workspace.selectedIds.value], ['input']);
+  editing = false;
+  activePanel = 'canvas';
+  assert.equal(ctrlA(), true);
+  assert.deepEqual([...workspace.selectedIds.value], ['input', 'output', 'link']);
+
+  activePanel = 'console';
+  assert.equal(ctrlA(), true);
+  assert.equal(selectedContent, consoleView.logList.value);
+  consoleView.activeTab.value = 'console';
+  assert.equal(ctrlA(), true);
+  assert.equal(selectedContent, consoleView.consoleContent.value);
+  const deleteKey = {key: 'Delete', target, preventDefault() {}};
+  workspace.handleKeyDown(deleteKey);
+  assert.equal(workspace.placedComponents.value.length, 3, 'Delete in the console leaves the model selection intact');
+  activePanel = 'properties';
+  assert.equal(ctrlA(), false);
+  activePanel = 'model-tree';
+  assert.equal(ctrlA(), true);
+  assert.equal(selectedContent, null);
+  workspace.handleKeyDown(deleteKey);
+  assert.equal(workspace.placedComponents.value.length, 0);
+  workspace.undoCanvasEdit();
+  assert.equal(workspace.placedComponents.value.length, 3);
+});
+
+test('floating windows can move and resize within the viewport and let the editor consume Escape', () => {
+  let emittedClose = 0;
+  let recording = true;
+  const floating = loadComponent('FloatingDialog', {
+    defaultIcon: '',
+    topDialogLayer: 1049,
+    useId: () => 'floating-title',
+    defineOptions() {},
+    defineProps: () => ({defaultWidth: 480, defaultHeight: 260}),
+    defineEmits: () => (event, nativeEvent) => {
+      if (event === 'keydown' && recording) nativeEvent.preventDefault();
+      if (event === 'close') emittedClose++;
+    },
+    window: {innerWidth: 1000, innerHeight: 700},
+  }, 'dialog, bounds, startInteraction, moveInteraction, endInteraction, handleKeyDown');
+  floating.dialog.value = {focus() {}};
+  let captured;
+  const handle = {
+    setPointerCapture: id => { captured = id; },
+    hasPointerCapture: id => captured === id,
+    releasePointerCapture: () => { captured = null; },
+  };
+  const pointer = (clientX, clientY) => ({
+    button: 0, pointerId: 1, clientX, clientY, currentTarget: handle, preventDefault() {},
+  });
+  floating.startInteraction(pointer(300, 130), 'move');
+  floating.moveInteraction(pointer(900, 600));
+  floating.endInteraction(pointer(900, 600));
+  assert.equal(captured, null);
+  assert.equal(floating.bounds.left, 520);
+  assert.equal(floating.bounds.top, 440);
+  floating.startInteraction(pointer(999, 699), 'se');
+  floating.moveInteraction(pointer(950, 730));
+  floating.endInteraction(pointer(950, 730));
+  assert.equal(floating.bounds.width, 431);
+  assert.equal(floating.bounds.height, 260);
+  const escape = () => Object.assign(new Event('keydown', {cancelable: true}), {key: 'Escape'});
+  floating.handleKeyDown(escape());
+  assert.equal(emittedClose, 0);
+  recording = false;
+  floating.handleKeyDown(escape());
+  assert.equal(emittedClose, 1);
+});
+
 test('shortcut settings record a draft, rebind on save and load the preference at the next start', () => {
   const stored = new Map();
   const target = Object.assign(new EventTarget(), {
@@ -1326,7 +2168,7 @@ test('shortcut settings record a draft, rebind on save and load the preference a
   const settings = loadComponent('ShortcutSettings', {
     ...shortcuts, defineProps: () => ({bindings: app.activeShortcutBindings.value}),
     defineEmits: () => (event) => { emitted = event; },
-  }, 'draft, toggleRecording, recordKey, recordMouse, cancel, restoreDefaults');
+  }, 'draft, recordingId, toggleRecording, recordKey, recordMouse, restoreDefaults');
   const send = (type, fields) => {
     const event = Object.assign(new Event(type, {cancelable: true}), fields);
     target.dispatchEvent(event);
@@ -1363,7 +2205,10 @@ test('shortcut settings record a draft, rebind on save and load the preference a
   send('keydown', combination);
   assert.equal(executions, 3);
   settings.toggleRecording(command);
-  settings.cancel();
+  const escape = Object.assign(new Event('keydown', {cancelable: true}), {key: 'Escape'});
+  settings.recordKey(escape);
+  assert.equal(settings.recordingId.value, null);
+  assert.equal(escape.defaultPrevented, true);
   assert.equal(emitted, undefined);
   settings.restoreDefaults();
   restarted.app.saveShortcutSettings(settings.draft.value);
@@ -1377,7 +2222,7 @@ test('input type is saved per input without changing its rule categories', () =>
   const workspace = loadComponent('WorkspaceLayout', {},
     'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
   workspace.handleComponentPlaced(buffer({id: 'input-1', type: 'systemInput'}));
-  workspace.handleComponentPlaced(buffer({id: 'input-2', type: 'systemInput'}));
+  workspace.handleComponentPlaced(buffer({id: 'input-2', type: 'systemInput', x: 15}));
   const [first, second] = workspace.placedComponents.value;
   const panel = loadComponent('PropertyPanel', {
     defineProps: () => ({selectedItem: first}),
@@ -1537,11 +2382,11 @@ test('assembly panel adds and edits validated BOM drafts through the shared dial
 
 test('changing assembly mode preserves the visible type of legacy recipes', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
-  for (const [id, previous, next, expected] of [
-    ['old-container', 'container', 'parts', 'AGV'],
-    ['old-part', 'parts', 'container', 'Workpiece'],
+  for (const [id, x, previous, next, expected] of [
+    ['old-container', 10, 'container', 'parts', 'AGV'],
+    ['old-part', 15, 'parts', 'container', 'Workpiece'],
   ]) {
-    workspace.handleComponentPlaced(buffer({id, type: 'assemblyWorkstation', assemblyMode: previous,
+    workspace.handleComponentPlaced(buffer({id, x, type: 'assemblyWorkstation', assemblyMode: previous,
       assemblyRecipes: [{containerType: 'AGV'}]}));
     workspace.handleUpdateComponentProperties({id, assemblyMode: next});
     const station = workspace.placedComponents.value.find(item => item.id === id);
@@ -1634,7 +2479,7 @@ test('disassembly station saves its own unit count, mode and selectable BOM rows
 test('workstations initialize fixed durations and preserve supplied values', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced');
   workspace.handleComponentPlaced(buffer({id: 'machine-1', type: 'workstation'}));
-  workspace.handleComponentPlaced(buffer({id: 'machine-2', type: 'workstation', processingTime: 0, setupTime: 1.005}));
+  workspace.handleComponentPlaced(buffer({id: 'machine-2', x: 15, type: 'workstation', processingTime: 0, setupTime: 1.005}));
   const [first, second] = workspace.placedComponents.value;
   assert.equal(first.processingTime, 60);
   assert.equal(first.setupTime, 0);
@@ -1645,7 +2490,7 @@ test('workstations initialize fixed durations and preserve supplied values', () 
 test('parallel workstation properties initialize defaults, validate edits and preserve unique equipment IDs', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleComponentPlaced, handleUpdateComponentProperties');
   workspace.handleComponentPlaced(buffer({id: 'parallel-1', type: 'parallelWorkstation'}));
-  workspace.handleComponentPlaced(buffer({id: 'parallel-2', type: 'parallelWorkstation', equipmentCount: 4}));
+  workspace.handleComponentPlaced(buffer({id: 'parallel-2', x: 15, type: 'parallelWorkstation', equipmentCount: 4}));
   const [first, second] = workspace.placedComponents.value;
   assert.equal(first.equipmentCount, 1);
   assert.equal(first.processingTime, 60);
@@ -1752,7 +2597,7 @@ test('port offsets are validated, clamped independently on resize and rotated wi
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
   workspace.placedComponents.value.push(
     {id: 'machine', type: 'workstation', x: -3, y: -2, width: 6, height: 4},
-    {id: 'source', type: 'systemInput', x: 0, y: 0, width: 3, height: 3},
+    {id: 'source', type: 'systemInput', x: -10, y: 0, width: 3, height: 3},
     {id: 'sink', type: 'systemOutput', x: 10, y: 0, width: 3, height: 3},
   );
   const [machine, source, sink] = workspace.placedComponents.value;
@@ -1967,14 +2812,14 @@ test('choosing the start endpoint preserves line direction and fixes the end cen
   workspace.handleUpdateComponentProperties({id: 'line', affectedEndpoint: 'from'});
   assert.equal(properties.connectionAffectedEndpoint.value, 'from');
   near(from.x, 0); near(from.y, 0);
-  workspace.handleUpdateComponentProperties({id: 'line', length: 5});
-  near(from.x, 3); near(from.y, 4);
+  workspace.handleUpdateComponentProperties({id: 'line', length: 8});
+  near(from.x, 1.2); near(from.y, 1.6);
   workspace.handleUpdateComponentProperties({id: 'line', angle: 90});
-  near(from.x, 6); near(from.y, 3);
+  near(from.x, 6); near(from.y, 0);
   workspace.handleUpdateComponentProperties({id: 'line', angle: -360});
-  near(from.x, 1); near(from.y, 8);
+  near(from.x, -2); near(from.y, 8);
   workspace.handleUpdateComponentProperties({id: 'line', length: 0});
-  near(from.x, 6); near(from.y, 8);
+  near(from.x, -2); near(from.y, 8);
   workspace.handleUpdateComponentProperties({id: 'line', length: 3});
   near(from.x, 3); near(from.y, 8);
   workspace.handleUpdateComponentProperties({id: 'line', workpieceSpeed: 4});
@@ -1992,7 +2837,8 @@ test('choosing the start endpoint preserves line direction and fixes the end cen
 
 test('connection geometry edits reject invalid numbers and retain direction through zero length', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
-  workspace.placedComponents.value.push(buffer({id: 'from', x: 0, y: 0}), buffer({id: 'to', x: 0, y: 5}),
+  workspace.placedComponents.value.push(buffer({id: 'from', x: 0, y: 0, unloadPoint: {x: 0, y: 1.5}}),
+    buffer({id: 'to', x: 0, y: 5, loadPoint: {x: 0, y: -1.5}}),
     {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to'});
   const to = workspace.placedComponents.value[1];
   for (const change of [{length: -1}, {length: Infinity}, {angle: 361}, {angle: NaN}, {workpieceSpeed: -1}]) {
@@ -2000,9 +2846,9 @@ test('connection geometry edits reject invalid numbers and retain direction thro
     near(to.x, 0); near(to.y, 5);
   }
   workspace.handleUpdateComponentProperties({id: 'line', length: 0});
-  near(to.x, 0); near(to.y, 0);
+  near(to.x, 0); near(to.y, 3);
   workspace.handleUpdateComponentProperties({id: 'line', length: 7});
-  near(to.x, 0); near(to.y, 7);
+  near(to.x, 0); near(to.y, 10);
 });
 
 test('connection table edits a segment without rounding untouched values or issuing duplicate updates', () => {

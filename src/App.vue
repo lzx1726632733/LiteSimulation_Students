@@ -27,8 +27,15 @@ const handlePlacementDone = () => {
   controlPanelRef.value?.resetToSelect()
 }
 
+const undoCanvasEdit = () => workspaceLayoutRef.value?.undoCanvasEdit()
+
 const shortcutCommands = {
+  'select-all': {
+    when: event => workspaceLayoutRef.value?.canSelectAll(event.target) ?? false,
+    run: event => workspaceLayoutRef.value?.selectAll(event.target),
+  },
   'repeat-last-tool': () => controlPanelRef.value?.repeatLastTool(),
+  'undo-canvas-edit': undoCanvasEdit,
 }
 const activeShortcutBindings = ref(shortcutBindings)
 const showShortcutSettings = ref(false)
@@ -69,7 +76,7 @@ const handleMenuAction = (id) => {
 <template>
     <Background>
         <TopBar @menu-action="handleMenuAction"></TopBar>
-        <TopToolbar></TopToolbar>
+        <TopToolbar @undo="undoCanvasEdit"></TopToolbar>
         <ControlPanel ref="controlPanelRef" @control-change="handleControlChange"></ControlPanel>
         <WorkspaceLayout ref="workspaceLayoutRef" @placement-done="handlePlacementDone"
                          @simulation-status-change="simulationStatus = $event"></WorkspaceLayout>

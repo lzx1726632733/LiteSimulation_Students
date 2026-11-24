@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1050 1024" width="200" height="200">
+    <defs>
+        <clipPath id="circle-interior">
+            <circle cx="525.5" cy="510.25" r="347.25"/>
+        </clipPath>
+    </defs>
+    <g fill="none" stroke="black" stroke-width="45.25">
+        <path d="M0 630 630 0 M0 830 830 0 M0 1030 1030 0 M0 1230 1230 0 M0 1430 1430 0"
+              clip-path="url(#circle-interior)"/>
+        <circle cx="525.5" cy="510.25" r="347.25"/>
+    </g>
+</svg>

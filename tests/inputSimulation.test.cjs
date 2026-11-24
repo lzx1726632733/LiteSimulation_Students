@@ -9,12 +9,16 @@ const {parse} = require('@vue/compiler-sfc');
 const read = name => fs.readFileSync(path.resolve(__dirname, '../src', name), 'utf8');
 const rules = vm.runInNewContext(read('utils/inputRules.js').replace(/export (const|function) /g, '$1 ') +
     '\n;({getInputType,getInputRuleCategory,INPUT_PROPERTY_DEFAULTS,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
-const stations = vm.runInNewContext(read('utils/stations.js').replace(/export const /g, 'const ') +
-    '\n;({getComponentCenter,getComponentFootprint,getComponentBounds,getComponentQuarterTurns})');
-const RESIZABLE_COMPONENT_TYPES = vm.runInNewContext(read('utils/componentAppearance.js').replace(/export const /g, 'const ') +
-    '\n;RESIZABLE_COMPONENT_TYPES');
+const triangle = vm.runInNewContext(read('utils/triangleObstacle.js').replace(/export (const|function) /g, '$1 ') +
+    '\n;({TRIANGULAR_OBSTACLE_TYPE, DEFAULT_TRIANGLE_SIZE})');
+const rectangularWall = vm.runInNewContext(read('utils/rectangularWall.js').replace(/export (const|function) /g, '$1 ') +
+    '\n;({RECTANGULAR_WALL_TYPE, DEFAULT_WALL_SIZE, getWallSettings, getWallOuterBounds})');
+const componentAppearance = vm.runInNewContext(read('utils/componentAppearance.js').replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
+    '\n;({RESIZABLE_COMPONENT_TYPES,RECTANGULAR_OBSTACLE_TYPE,CIRCULAR_OBSTACLE_TYPE,getCircleRadius})', {...triangle, ...rectangularWall});
+const stations = vm.runInNewContext(read('utils/stations.js').replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
+    '\n;({getComponentCenter,getComponentFootprint,getComponentBounds,getComponentQuarterTurns})', {...triangle, ...componentAppearance, ...rectangularWall});
 const getComponentPortPosition = vm.runInNewContext(read('utils/componentPorts.js').replace(/^import .*;\r?$/gm, '')
-    .replace(/export function /g, 'function ') + '\n;getComponentPortPosition', {...stations, RESIZABLE_COMPONENT_TYPES});
+    .replace(/export function /g, 'function ') + '\n;getComponentPortPosition', {...stations, ...componentAppearance});
 const pathGeometry = vm.runInNewContext(read('utils/agvPath.js').replace(/export const /g, 'const ') +
     '\n;({buildPathArc,getPathCorner,pointOnPathSegment})');
 const connection = vm.runInNewContext(read('utils/connectionLine.js').replace(/^import .*;\r?$/gm, '')

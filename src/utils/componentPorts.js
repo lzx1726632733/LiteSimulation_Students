@@ -1,4 +1,4 @@
-import {RESIZABLE_COMPONENT_TYPES} from './componentAppearance.js';
+import {RECTANGULAR_OBSTACLE_TYPE, RESIZABLE_COMPONENT_TYPES} from './componentAppearance.js';
 import {getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns} from './stations.js';
 
 const PORTS = [
@@ -7,7 +7,7 @@ const PORTS = [
 ];
 
 export function getComponentPorts(component) {
-    if (!RESIZABLE_COMPONENT_TYPES.has(component?.type)) return [];
+    if (!RESIZABLE_COMPONENT_TYPES.has(component?.type) || component.type === RECTANGULAR_OBSTACLE_TYPE) return [];
     return PORTS.filter(port => port.excludedType !== component.type);
 }
 

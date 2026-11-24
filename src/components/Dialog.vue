@@ -1,171 +1,215 @@
 <template>
-    <Teleport to="body">
-        <section ref="dialog" class="floating-dialog" role="dialog" aria-labelledby="dialog-title"
-                 tabindex="-1" :style="windowStyle" @keydown.stop @keydown.esc="emit('close')"
-                 @pointerdown.stop @click.stop @dblclick.stop>
-            <header class="dialog-titlebar" @pointerdown="startInteraction($event, 'move')"
-                    @pointermove="moveInteraction" @pointerup="endInteraction" @pointercancel="endInteraction"
-                    @lostpointercapture="endInteraction">
-                <img :src="activeDialogIcon" alt="" draggable="false">
-                <span id="dialog-title">{{ dialogTitle }}</span>
-                <button class="close-button" type="button" aria-label="关闭" @pointerdown.stop @click="emit('close')">×</button>
-            </header>
+    <FloatingDialog :title="dialogTitle" :icon="activeDialogIcon"
+                    :default-width="defaultWidth" :default-height="defaultHeight" @close="emit('close')">
+        <!-- 按控件类型和弹窗用途选择内容，后续弹窗统一在这里增加分支。 -->
+        <template v-if="dialogDefinition">
+            <div class="dialog-toolbar">
+                <button type="button" @click="addRow">新增行</button>
+                <button type="button" :disabled="selectedRow === null" @click="deleteRow">删除行</button>
+                <button type="button" :disabled="rows.length === 0" @click="clearRows">清空</button>
+            </div>
 
-            <!-- 按控件类型和弹窗用途选择内容，后续弹窗统一在这里增加分支。 -->
-            <template v-if="item.type === 'systemInput' && dialogType === 'input-rule'">
-                <div class="dialog-toolbar">
-                    <button type="button" @click="addRow">新增行</button>
-                    <button type="button" :disabled="selectedRow === null" @click="deleteRow">删除行</button>
-                    <button type="button" :disabled="rows.length === 0" @click="clearRows">清空</button>
-                </div>
+            <div class="table-container">
+                <table aria-label="输入规则">
+                    <thead>
+                        <tr>
+                            <th scope="col" class="row-number"><span class="visually-hidden">行号</span></th>
+                            <th v-for="column in columns" :key="column.key" scope="col" :title="column.title">{{ column.label }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, index) in rows" :key="index" :class="{selected: selectedRow === index}"
+                            tabindex="0" :aria-selected="selectedRow === index" @click="selectedRow = index"
+                            @focus="selectedRow = index" @focusin="selectedRow = index" @keydown.delete.prevent="deleteRow">
+                            <th scope="row" class="row-number">{{ index + 1 }}</th>
+                            <td v-for="column in columns" :key="column.key">
+                                <input v-if="column.key === 'fillColor'" class="color-swatch" type="color"
+                                       :value="row.fillColor" :aria-label="`第${index + 1}行填充色`"
+                                       title="双击修改填充色，或按 Enter 打开颜色选择器"
+                                       @click.prevent @dblclick="openColorPicker" @keydown.stop
+                                       @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker"
+                                       @input="row.fillColor = $event.target.value"/>
+                                <div v-else-if="column.key === 'relativeWeight'" class="weight-cell">
+                                    <input v-model.number="row.relativeWeight" class="cell-input" type="number" min="0" step="any"
+                                           :aria-label="`第${index + 1}行相对比例值`" @keydown.stop/>
+                                    <span class="probability">占比 {{ formatProbability(index) }}</span>
+                                </div>
+                                <input v-else-if="column.key === 'length' || column.key === 'width'"
+                                       v-model.number="row[column.key]" class="cell-input" type="number" min="0" step="any"
+                                       :aria-label="`第${index + 1}行${column.label}`" title="单位：毫米（mm），必须大于 0" @keydown.stop/>
+                                <input v-else v-model="row[column.key]" class="cell-input" type="text"
+                                       :aria-label="`第${index + 1}行${column.label}`" @keydown.stop/>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p v-if="validationMessage" class="rule-error" role="alert">{{ validationMessage }}</p>
+        </template>
 
-                <div class="table-container">
-                    <table aria-label="输入规则">
-                        <thead>
-                            <tr>
-                                <th scope="col" class="row-number"><span class="visually-hidden">行号</span></th>
-                                <th v-for="column in columns" :key="column.key" scope="col" :title="column.title">{{ column.label }}</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr v-for="(row, index) in rows" :key="index" :class="{selected: selectedRow === index}"
-                                tabindex="0" :aria-selected="selectedRow === index" @click="selectedRow = index"
-                                @focus="selectedRow = index" @focusin="selectedRow = index" @keydown.delete.prevent="deleteRow">
-                                <th scope="row" class="row-number">{{ index + 1 }}</th>
-                                <td v-for="column in columns" :key="column.key">
-                                    <input v-if="column.key === 'fillColor'" class="color-swatch" type="color"
-                                           :value="row.fillColor" :aria-label="`第${index + 1}行填充色`"
-                                           title="双击修改填充色，或按 Enter 打开颜色选择器"
-                                           @click.prevent @dblclick="openColorPicker" @keydown.stop
-                                           @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker"
-                                           @input="row.fillColor = $event.target.value"/>
-                                    <div v-else-if="column.key === 'relativeWeight'" class="weight-cell">
-                                        <input v-model.number="row.relativeWeight" class="cell-input" type="number" min="0" step="any"
-                                               :aria-label="`第${index + 1}行相对比例值`" @keydown.stop/>
-                                        <span class="probability">占比 {{ formatProbability(index) }}</span>
-                                    </div>
-                                    <input v-else-if="column.key === 'length' || column.key === 'width'"
-                                           v-model.number="row[column.key]" class="cell-input" type="number" min="0" step="any"
-                                           :aria-label="`第${index + 1}行${column.label}`" title="单位：毫米（mm），必须大于 0" @keydown.stop/>
-                                    <input v-else v-model="row[column.key]" class="cell-input" type="text"
-                                           :aria-label="`第${index + 1}行${column.label}`" @keydown.stop/>
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
+        <template v-else-if="isBomEditor">
+            <div class="assembly-fields" :class="{'disassembly-fields': isDisassemblyEditor}">
+                <label>{{ bomObjectLabel }}类型 <input v-model="recipeDraft.productType" type="text" required></label>
+                <label v-if="isAssemblyEditor">类型
+                    <select v-if="assemblyMode === 'container'" v-model="recipeDraft.packingType">
+                        <option v-for="type in CONTAINER_TYPES" :key="type">{{ type }}</option>
+                    </select>
+                    <input v-else :value="recipeDraft.packingType" disabled>
+                </label>
+                <label>{{ isDisassemblyEditor ? '拆卸时长' : '装配时长' }}
+                    <input v-model="recipeDraft[durationField]" title="dd:hh:mm:ss.ms" required
+                           @blur="formatBomDuration(durationField)">
+                </label>
+                <label>{{ bomObjectLabel }}名称 <input v-model="recipeDraft.name" type="text"></label>
+                <label v-if="isAssemblyEditor">颜色
+                    <input class="assembly-color" type="color" v-model="recipeDraft.fillColor"
+                           :style="{'--assembly-fill': recipeDraft.fillColor}"
+                           title="双击修改颜色，或按 Enter 打开颜色选择器"
+                           @click.prevent @dblclick="openColorPicker"
+                           @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
+                </label>
+                <label>准备时长
+                    <input v-model="recipeDraft.setupTime" title="dd:hh:mm:ss.ms" required
+                           @blur="formatBomDuration('setupTime')">
+                </label>
+            </div>
+            <p v-if="isDisassemblyEditor && disassemblyMode === 'container'" class="bom-hint">提示：容器到站后自动卸下全部零件，无需填写 BOM。</p>
+            <div class="table-container assembly-materials">
+                <table :aria-label="isDisassemblyEditor ? '拆卸零件清单' : '装配所需工件'">
+                    <thead>
+                        <tr>
+                            <th scope="col">{{ materialTypeLabel }}</th>
+                            <th scope="col">{{ materialLabel }}数量</th>
+                            <th scope="col">{{ materialLabel }}名称</th>
+                            <th v-if="isDisassemblyEditor" scope="col">零件颜色</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, index) in recipeDraft.materials" :key="index" tabindex="0"
+                            :class="{selected: selectedMaterialRow === index}" :aria-selected="selectedMaterialRow === index"
+                            @click="selectedMaterialRow = index" @focusin="selectedMaterialRow = index">
+                            <td><input v-model="row.partType" class="cell-input" :aria-label="`第 ${index + 1} 行${materialTypeLabel}`" required></td>
+                            <td><input v-model.number="row.quantity" class="cell-input" type="number" min="1" step="1"
+                                       :aria-label="`第 ${index + 1} 行${materialLabel}数量`" required></td>
+                            <td><input v-model="row.name" class="cell-input" :aria-label="`第 ${index + 1} 行${materialLabel}名称`"></td>
+                            <td v-if="isDisassemblyEditor">
+                                <input v-model="row.fillColor" class="color-swatch" type="color"
+                                       :aria-label="`第 ${index + 1} 行零件颜色`"
+                                       title="双击修改颜色，或按 Enter 打开颜色选择器"
+                                       @click.prevent @dblclick="openColorPicker"
+                                       @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p v-if="bomError" class="rule-error" role="alert">{{ bomError }}</p>
+        </template>
+
+        <form v-else-if="isConnectionRadiusEditor" id="connection-radius-form" class="numeric-dialog-form"
+              @submit.prevent="saveConnectionRadius">
+            <label for="connection-radius">半径（米）</label>
+            <input ref="initialNumericInput" id="connection-radius" v-model.number="radiusDraft" type="number"
+                   step="any" min="0" :max="connectionCorner?.maxRadius" required
+                   aria-describedby="connection-radius-range"/>
+            <p id="connection-radius-range" v-if="connectionCorner">
+                范围 0 至 {{ connectionCorner.maxRadius }} 米。输入 0 恢复为拐点。
+            </p>
+            <p id="connection-radius-range" v-else>当前拐点已不可用。</p>
+        </form>
+
+        <form v-else-if="isFiniteCanvasEditor" id="finite-canvas-form" class="numeric-dialog-form"
+              @submit.prevent="saveCanvasSize">
+            <label class="canvas-size-field">
+                <span>长度</span>
+                <input ref="initialNumericInput" v-model.number="canvasSizeDraft.length" type="number"
+                       step="any" min="0" required aria-label="长度（米）" title="X 方向"/>
+                <span>m</span>
+            </label>
+            <label class="canvas-size-field">
+                <span>宽度</span>
+                <input v-model.number="canvasSizeDraft.width" type="number"
+                       step="any" min="0" required aria-label="宽度（米）" title="Y 方向"/>
+                <span>m</span>
+            </label>
+            <p v-if="canvasSizeError" class="rule-error" role="status">{{ canvasSizeError }}</p>
+        </form>
+
+        <form v-else-if="isTriangleEditor" id="triangle-definition-form" class="numeric-dialog-form"
+              novalidate @submit.prevent="saveTriangleDefinition">
+            <div class="triangle-definition">
+                <svg viewBox="0 0 224 186" role="img" aria-label="角 A 在上方，B 在左下，C 在右下。边 1 是 AB，边 2 是 AC，边 3 是 BC。">
+                    <path d="M112 25 30 150H194Z" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+                    <path d="M99 45Q112 53 125 45 M44 129Q56 136 56 150 M180 129Q168 136 168 150"
+                          fill="none" stroke="#64748b" stroke-width="1"/>
+                    <g text-anchor="middle" fill="#1f2937">
+                        <text x="112" y="67">A</text>
+                        <text x="68" y="141">B</text>
+                        <text x="156" y="141">C</text>
+                        <text x="59" y="85">1</text>
+                        <text x="165" y="85">2</text>
+                        <text x="112" y="172">3</text>
+                    </g>
+                </svg>
+                <div class="triangle-fields">
+                    <label v-for="field in TRIANGLE_FIELDS" :key="field.key">
+                        <span>{{ field.label }}</span>
+                        <input v-model="triangleDraft[field.key]" type="number" step="any"
+                               :placeholder="triangleSolution.parameters ? formatTriangleValue(triangleSolution.parameters[field.key]) : ''"
+                               aria-describedby="triangle-definition-status"/>
+                        <span>{{ field.unit }}</span>
+                    </label>
                 </div>
-                <p v-if="validationMessage" class="rule-error" role="alert">{{ validationMessage }}</p>
+            </div>
+            <p id="triangle-definition-status" role="status" :class="{'rule-error': triangleError}">
+                {{ triangleError || triangleSolution.hint || '三角形已确定。空白输入框中的灰色数值为计算结果。' }}
+            </p>
+        </form>
+
+        <template #footer>
+            <template v-if="isBomEditor">
+                <button type="button" @click="addMaterialRow">增加行</button>
+                <button type="button" :disabled="selectedMaterialRow === null" @click="deleteMaterialRow">删除行</button>
+                <button type="button" class="save-button" :disabled="!!bomError" @click="saveBomRecipe">确定</button>
+                <button type="button" @click="emit('close')">取消</button>
             </template>
-
-            <template v-else-if="isBomEditor">
-                <div class="assembly-fields" :class="{'disassembly-fields': isDisassemblyEditor}">
-                    <label>{{ bomObjectLabel }}类型 <input v-model="recipeDraft.productType" type="text" required></label>
-                    <label v-if="isAssemblyEditor">类型
-                        <select v-if="assemblyMode === 'container'" v-model="recipeDraft.packingType">
-                            <option v-for="type in CONTAINER_TYPES" :key="type">{{ type }}</option>
-                        </select>
-                        <input v-else :value="recipeDraft.packingType" disabled>
-                    </label>
-                    <label>{{ isDisassemblyEditor ? '拆卸时长' : '装配时长' }}
-                        <input v-model="recipeDraft[durationField]" title="dd:hh:mm:ss.ms" required
-                               @blur="formatBomDuration(durationField)">
-                    </label>
-                    <label>{{ bomObjectLabel }}名称 <input v-model="recipeDraft.name" type="text"></label>
-                    <label v-if="isAssemblyEditor">颜色
-                        <input class="assembly-color" type="color" v-model="recipeDraft.fillColor"
-                               :style="{'--assembly-fill': recipeDraft.fillColor}"
-                               title="双击修改颜色，或按 Enter 打开颜色选择器"
-                               @click.prevent @dblclick="openColorPicker"
-                               @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
-                    </label>
-                    <label>准备时长
-                        <input v-model="recipeDraft.setupTime" title="dd:hh:mm:ss.ms" required
-                               @blur="formatBomDuration('setupTime')">
-                    </label>
-                </div>
-                <p v-if="isDisassemblyEditor && disassemblyMode === 'container'" class="bom-hint">提示：容器到站后自动卸下全部零件，无需填写 BOM。</p>
-                <div class="table-container assembly-materials">
-                    <table :aria-label="isDisassemblyEditor ? '拆卸零件清单' : '装配所需工件'">
-                        <thead>
-                            <tr>
-                                <th scope="col">{{ materialTypeLabel }}</th>
-                                <th scope="col">{{ materialLabel }}数量</th>
-                                <th scope="col">{{ materialLabel }}名称</th>
-                                <th v-if="isDisassemblyEditor" scope="col">零件颜色</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr v-for="(row, index) in recipeDraft.materials" :key="index" tabindex="0"
-                                :class="{selected: selectedMaterialRow === index}" :aria-selected="selectedMaterialRow === index"
-                                @click="selectedMaterialRow = index" @focusin="selectedMaterialRow = index">
-                                <td><input v-model="row.partType" class="cell-input" :aria-label="`第 ${index + 1} 行${materialTypeLabel}`" required></td>
-                                <td><input v-model.number="row.quantity" class="cell-input" type="number" min="1" step="1"
-                                           :aria-label="`第 ${index + 1} 行${materialLabel}数量`" required></td>
-                                <td><input v-model="row.name" class="cell-input" :aria-label="`第 ${index + 1} 行${materialLabel}名称`"></td>
-                                <td v-if="isDisassemblyEditor">
-                                    <input v-model="row.fillColor" class="color-swatch" type="color"
-                                           :aria-label="`第 ${index + 1} 行零件颜色`"
-                                           title="双击修改颜色，或按 Enter 打开颜色选择器"
-                                           @click.prevent @dblclick="openColorPicker"
-                                           @keydown.enter.prevent="openColorPicker" @keydown.space.prevent="openColorPicker">
-                                </td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-                <p v-if="bomError" class="rule-error" role="alert">{{ bomError }}</p>
+            <template v-else-if="isConnectionRadiusEditor || isFiniteCanvasEditor">
+                <button type="submit" :form="isFiniteCanvasEditor ? 'finite-canvas-form' : 'connection-radius-form'"
+                        class="save-button" :disabled="isFiniteCanvasEditor ? !!canvasSizeError : !radiusValid">确定</button>
+                <button type="button" @click="emit('close')">取消</button>
             </template>
-
-            <form v-else-if="isConnectionRadiusEditor" id="connection-radius-form" class="connection-radius-form"
-                  @submit.prevent="saveConnectionRadius">
-                <label for="connection-radius">半径（米）</label>
-                <input ref="radiusInput" id="connection-radius" v-model.number="radiusDraft" type="number"
-                       step="any" min="0" :max="connectionCorner?.maxRadius" required
-                       aria-describedby="connection-radius-range"/>
-                <p id="connection-radius-range" v-if="connectionCorner">
-                    范围 0 至 {{ connectionCorner.maxRadius }} 米。输入 0 恢复为拐点。
-                </p>
-                <p id="connection-radius-range" v-else>当前拐点已不可用。</p>
-            </form>
-
-            <footer class="dialog-footer">
-                <template v-if="isBomEditor">
-                    <button type="button" @click="addMaterialRow">增加行</button>
-                    <button type="button" :disabled="selectedMaterialRow === null" @click="deleteMaterialRow">删除行</button>
-                    <button type="button" class="save-button" :disabled="!!bomError" @click="saveBomRecipe">确定</button>
-                    <button type="button" @click="emit('close')">取消</button>
-                </template>
-                <template v-else-if="isConnectionRadiusEditor">
-                    <button type="submit" form="connection-radius-form" class="save-button" :disabled="!radiusValid">确定</button>
-                    <button type="button" @click="emit('close')">取消</button>
-                </template>
-                <template v-else>
-                    <button type="button" class="save-button" :disabled="!dialogDefinition || !!validationMessage" @click="saveDialog">保存退出</button>
-                    <button type="button" @click="emit('close')">退出</button>
-                </template>
-            </footer>
-
-            <div v-for="edge in resizeEdges" :key="edge" :class="['resize-handle', `resize-${edge}`]"
-                 aria-hidden="true" @pointerdown="startInteraction($event, edge)" @pointermove="moveInteraction"
-                 @pointerup="endInteraction" @pointercancel="endInteraction" @lostpointercapture="endInteraction"/>
-        </section>
-    </Teleport>
+            <template v-else-if="isTriangleEditor">
+                <button type="submit" form="triangle-definition-form" class="save-button"
+                        :disabled="!triangleSolution.vertices || !!triangleError">确定</button>
+                <button type="button" @click="emit('close')">取消</button>
+            </template>
+            <template v-else>
+                <button type="button" class="save-button" :disabled="!dialogDefinition || !!validationMessage" @click="saveDialog">保存退出</button>
+                <button type="button" @click="emit('close')">退出</button>
+            </template>
+        </template>
+    </FloatingDialog>
 </template>
 
 <script setup>
-import {computed, onBeforeUnmount, onMounted, reactive, ref, watch} from 'vue';
+import {computed, onMounted, reactive, ref, watch} from 'vue';
+import FloatingDialog from './FloatingDialog.vue';
 import {getComponentLabel} from '../utils/componentLabel.js';
 import systemInputIcon from '../assets/icons/systemInput.svg';
 import dialogIcon from '../assets/icons/logo.svg';
 import assemblyIcon from '../assets/icons/assemblyWorkstation.svg';
 import disassemblyIcon from '../assets/icons/disassemblyWorkstation.svg';
 import connectionIcon from '../assets/icons/connectionLine.svg';
+import canvasIcon from '../assets/icons/canvas.svg';
+import triangleIcon from '../assets/icons/triangularObstacle.svg';
 import {PART_COLORS, getInputType, getInputRuleCategory, getInputRuleProbabilities, getInputRuleValidationMessage, getDefaultWorkpieceDimensions, parseGenerationInterval, formatGenerationInterval} from '../utils/inputRules.js';
 import {CONTAINER_TYPES, getAssemblyRecipeError} from '../utils/assemblyRecipes.js';
 import {getDisassemblyRecipeError} from '../utils/disassemblyRecipes.js';
+import {getCanvasSizeError} from '../utils/canvasBoundary.js';
+import {formatTriangleValue, solveTriangle, TRIANGLE_FIELDS} from '../utils/triangleObstacle.js';
 
 const props = defineProps({
-    item: {type: Object, required: true},
+    item: {type: Object, default: null},
     dialogType: {type: String, required: true},
     assemblyRecipe: {type: Object, default: null},
     assemblyMode: {type: String, default: 'parts'},
@@ -173,9 +217,11 @@ const props = defineProps({
     disassemblyRecipe: {type: Object, default: null},
     disassemblyMode: {type: String, default: 'parts'},
     connectionCorner: {type: Object, default: null},
+    canvasSize: {type: Object, default: null},
+    minimumCanvasSize: {type: Object, default: undefined},
+    validateTriangle: {type: Function, default: null},
 });
 const emit = defineEmits(['close', 'save']);
-const dialog = ref(null);
 const inputType = computed(() => getInputType(props.item));
 // 第一层区分控件类型，第二层区分该控件的弹窗用途。
 const dialogDefinitions = {
@@ -186,12 +232,23 @@ const dialogDefinitions = {
         },
     },
 };
-const dialogDefinition = computed(() => dialogDefinitions[props.item.type]?.[props.dialogType]);
-const isAssemblyEditor = computed(() => props.item.type === 'assemblyWorkstation' && props.dialogType === 'assembly-recipe');
-const isDisassemblyEditor = computed(() => props.item.type === 'disassemblyWorkstation' && props.dialogType === 'disassembly-recipe');
+const dialogDefinition = computed(() => dialogDefinitions[props.item?.type]?.[props.dialogType]);
+const isAssemblyEditor = computed(() => props.item?.type === 'assemblyWorkstation' && props.dialogType === 'assembly-recipe');
+const isDisassemblyEditor = computed(() => props.item?.type === 'disassemblyWorkstation' && props.dialogType === 'disassembly-recipe');
 const isBomEditor = computed(() => isAssemblyEditor.value || isDisassemblyEditor.value);
-const isConnectionRadiusEditor = computed(() => props.item.type === 'connectionLine' && props.dialogType === 'connection-radius');
-const radiusInput = ref(null);
+const isConnectionRadiusEditor = computed(() => props.item?.type === 'connectionLine' && props.dialogType === 'connection-radius');
+const isFiniteCanvasEditor = computed(() => props.dialogType === 'finite-canvas');
+const isTriangleEditor = computed(() => props.dialogType === 'triangle-definition');
+const triangleDraft = reactive({});
+const triangleSolution = computed(() => solveTriangle(triangleDraft));
+const triangleError = computed(() => triangleSolution.value.error ||
+    (triangleSolution.value.vertices && props.validateTriangle?.(triangleSolution.value.vertices)));
+
+function saveTriangleDefinition() {
+    if (!triangleSolution.value.vertices || triangleError.value) return;
+    emit('save', {itemId: props.item.id, dialogType: props.dialogType, triangleVertices: triangleSolution.value.vertices});
+}
+const initialNumericInput = ref(null);
 const radiusDraft = ref(props.connectionCorner?.radius ?? '');
 const radiusValid = computed(() => Number.isFinite(radiusDraft.value) && radiusDraft.value >= 0 &&
     radiusDraft.value <= (props.connectionCorner?.maxRadius ?? -1));
@@ -201,7 +258,17 @@ function saveConnectionRadius() {
     emit('save', {itemId: props.item.id, dialogType: props.dialogType, radius: radiusDraft.value});
 }
 
+const canvasSizeDraft = reactive({length: props.canvasSize?.length ?? '', width: props.canvasSize?.width ?? ''});
+const canvasSizeError = computed(() => getCanvasSizeError(canvasSizeDraft, props.minimumCanvasSize));
+
+function saveCanvasSize() {
+    if (canvasSizeError.value) return;
+    emit('save', {dialogType: props.dialogType, canvasSize: {...canvasSizeDraft}});
+}
+
 const activeDialogIcon = computed(() => {
+    if (isTriangleEditor.value) return triangleIcon;
+    if (isFiniteCanvasEditor.value) return canvasIcon;
     if (isConnectionRadiusEditor.value) return connectionIcon;
     if (isDisassemblyEditor.value) return disassemblyIcon;
     if (isAssemblyEditor.value) return assemblyIcon;
@@ -210,6 +277,8 @@ const activeDialogIcon = computed(() => {
 const originalRecipe = isDisassemblyEditor.value ? props.disassemblyRecipe : props.assemblyRecipe;
 const durationField = isDisassemblyEditor.value ? 'disassemblyTime' : 'assemblyTime';
 const dialogTitle = computed(() => {
+    if (isTriangleEditor.value) return `${getComponentLabel(props.item)} · 定义三角形`;
+    if (isFiniteCanvasEditor.value) return '有限画布';
     if (isConnectionRadiusEditor.value) return `${getComponentLabel(props.item)} · 编辑圆弧半径`;
     if (isBomEditor.value) {
         const title = isDisassemblyEditor.value ? '拆卸 BOM 清单' : 'BOM清单';
@@ -275,8 +344,8 @@ function saveBomRecipe() {
 const rows = ref([]);
 const selectedRow = ref(null);
 let nextColorIndex = 0;
-watch(() => [props.item.id, props.item.type, props.dialogType], () => {
-    const savedRows = props.item[dialogDefinition.value?.dataField];
+watch(() => [props.item?.id, props.item?.type, props.dialogType], () => {
+    const savedRows = props.item?.[dialogDefinition.value?.dataField];
     rows.value = Array.isArray(savedRows) ? savedRows.map(({entityType, ...row}, index) => ({
         ...row,
         partType: getInputRuleCategory({...row, entityType}) ?? '',
@@ -347,141 +416,16 @@ function clearRows() {
     nextColorIndex = 0;
 }
 
-// 每次打开采用相同的默认位置和尺寸，小视口下自动缩小到可见范围。
-const defaultWidth = isConnectionRadiusEditor.value ? 440 : 920;
-const defaultHeight = isConnectionRadiusEditor.value ? 260 : 560;
-const bounds = reactive({
-    left: Math.max(8, (window.innerWidth - defaultWidth) / 2),
-    top: Math.min(120, Math.max(8, window.innerHeight - defaultHeight - 8)),
-    width: Math.min(defaultWidth, window.innerWidth - 16),
-    height: Math.min(defaultHeight, window.innerHeight - 16),
-});
-const windowStyle = computed(() => ({
-    left: `${bounds.left}px`, top: `${bounds.top}px`,
-    width: `${bounds.width}px`, height: `${bounds.height}px`,
-}));
-const resizeEdges = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'];
-let interaction = null;
-
-function startInteraction(event, mode) {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    dialog.value.focus({preventScroll: true});
-    interaction = {mode, pointerId: event.pointerId, x: event.clientX, y: event.clientY, ...bounds};
-    event.currentTarget.setPointerCapture(event.pointerId);
-}
-
-function moveInteraction(event) {
-    if (!interaction || event.pointerId !== interaction.pointerId) return;
-    const start = interaction;
-    const dx = event.clientX - start.x;
-    const dy = event.clientY - start.y;
-    if (start.mode === 'move') {
-        bounds.left = Math.max(0, Math.min(window.innerWidth - bounds.width, start.left + dx));
-        bounds.top = Math.max(0, Math.min(window.innerHeight - bounds.height, start.top + dy));
-        return;
-    }
-
-    const minWidth = Math.min(420, window.innerWidth);
-    const minHeight = Math.min(260, window.innerHeight);
-    if (start.mode.includes('e')) {
-        bounds.width = Math.max(minWidth, Math.min(window.innerWidth - start.left, start.width + dx));
-    }
-    if (start.mode.includes('s')) {
-        bounds.height = Math.max(minHeight, Math.min(window.innerHeight - start.top, start.height + dy));
-    }
-    if (start.mode.includes('w')) {
-        bounds.left = Math.max(0, Math.min(start.left + start.width - minWidth, start.left + dx));
-        bounds.width = start.left + start.width - bounds.left;
-    }
-    if (start.mode.includes('n')) {
-        bounds.top = Math.max(0, Math.min(start.top + start.height - minHeight, start.top + dy));
-        bounds.height = start.top + start.height - bounds.top;
-    }
-}
-
-function endInteraction(event) {
-    if (!interaction || event.pointerId !== interaction.pointerId) return;
-    interaction = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-}
-
-function fitToViewport() {
-    interaction = null;
-    bounds.width = Math.min(bounds.width, window.innerWidth);
-    bounds.height = Math.min(bounds.height, window.innerHeight);
-    bounds.left = Math.max(0, Math.min(bounds.left, window.innerWidth - bounds.width));
-    bounds.top = Math.max(0, Math.min(bounds.top, window.innerHeight - bounds.height));
-}
-
-let previousFocus;
+const compactDialog = isConnectionRadiusEditor.value || isFiniteCanvasEditor.value;
+const defaultWidth = isTriangleEditor.value ? 560 : compactDialog ? 440 : 920;
+const defaultHeight = isTriangleEditor.value ? 370 : compactDialog ? 260 : 560;
 onMounted(() => {
-    previousFocus = document.activeElement;
-    const focusTarget = radiusInput.value ?? dialog.value;
-    focusTarget.focus({preventScroll: true});
-    radiusInput.value?.select();
-    window.addEventListener('resize', fitToViewport);
-});
-onBeforeUnmount(() => {
-    window.removeEventListener('resize', fitToViewport);
-    if (dialog.value?.contains(document.activeElement) && previousFocus?.isConnected) {
-        previousFocus.focus({preventScroll: true});
-    }
+    initialNumericInput.value?.focus({preventScroll: true});
+    initialNumericInput.value?.select();
 });
 </script>
 
 <style scoped>
-.floating-dialog {
-    position: fixed;
-    z-index: 1050;
-    display: flex;
-    flex-direction: column;
-    box-sizing: border-box;
-    border: 1px solid #858585;
-    background: #f5f5f5;
-    box-shadow: 0 3px 12px #0003;
-    color: #1f2937;
-    font-family: inherit;
-    font-size: 13px;
-    outline: none;
-}
-.dialog-titlebar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 38px;
-    padding-left: 10px;
-    cursor: move;
-    touch-action: none;
-    user-select: none;
-}
-.dialog-titlebar img { width: 22px; height: 22px; }
-.dialog-titlebar span { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #737b87; }
-.floating-dialog button {
-    min-width: 82px;
-    padding: 5px 16px;
-    border: 1px solid #d5d5d5;
-    border-radius: 6px;
-    background: #fff;
-    color: inherit;
-    font: inherit;
-    cursor: pointer;
-}
-.floating-dialog button:hover { background: #eaf2ff; }
-.floating-dialog button:focus-visible { outline: 2px solid #4b8dff; outline-offset: 1px; }
-.floating-dialog button:disabled { opacity: .45; cursor: default; }
-.floating-dialog .close-button {
-    align-self: stretch;
-    min-width: 42px;
-    padding: 0;
-    border: none;
-    border-radius: 0;
-    background: transparent;
-    font-size: 23px;
-}
-.floating-dialog .close-button:hover { background: #e81123; color: white; }
 .dialog-toolbar { display: flex; justify-content: center; flex-wrap: wrap; gap: 12px; padding: 10px 8px 8px; }
 .assembly-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; padding: 8px 12px 12px; overflow: auto; }
 .assembly-fields.disassembly-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -540,21 +484,14 @@ tbody tr:focus-visible { outline: 1px solid #111; outline-offset: -1px; }
 .weight-cell { display: flex; flex-direction: column; align-items: center; }
 .probability { font-size: 11px; opacity: .8; }
 .rule-error { margin: 6px 8px 0; color: #b91c1c; }
-.connection-radius-form { display: grid; align-content: start; gap: 8px; flex: 1; padding: 16px 12px; overflow: auto; }
-.connection-radius-form input { width: 100%; min-width: 0; box-sizing: border-box; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
-.connection-radius-form p { margin: 0; overflow-wrap: anywhere; }
-.dialog-footer { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; padding: 12px 8px 8px; }
-.floating-dialog .save-button { border-color: #0780ff; background: #0780ff; color: white; }
-.floating-dialog .save-button:hover { background: #006ad9; }
+.numeric-dialog-form { display: grid; align-content: start; gap: 8px; flex: 1; padding: 16px 12px; overflow: auto; }
+.numeric-dialog-form input { width: 100%; min-width: 0; box-sizing: border-box; padding: 5px 8px; border: 1px solid #d1d5db; border-radius: 4px; font: inherit; }
+.numeric-dialog-form p { margin: 0; overflow-wrap: anywhere; }
+.canvas-size-field { display: grid; grid-template-columns: 3em minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.triangle-definition { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.triangle-definition svg { width: 100%; max-width: 224px; flex: 1 1 170px; margin-inline: auto; font-size: 15px; }
+.triangle-fields { flex: 1 1 220px; min-width: 0; display: grid; gap: 6px; }
+.triangle-fields label { display: grid; grid-template-columns: 6em minmax(0, 1fr) 1em; align-items: center; gap: 6px; }
+.triangle-fields input::placeholder { color: #556274; opacity: 1; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.resize-handle { position: absolute; touch-action: none; }
-.resize-n, .resize-s { left: 6px; right: 6px; height: 6px; cursor: ns-resize; }
-.resize-n { top: -3px; } .resize-s { bottom: -3px; }
-.resize-e, .resize-w { top: 6px; bottom: 6px; width: 6px; cursor: ew-resize; }
-.resize-e { right: -3px; } .resize-w { left: -3px; }
-.resize-ne, .resize-nw, .resize-se, .resize-sw { width: 10px; height: 10px; }
-.resize-ne, .resize-sw { cursor: nesw-resize; }
-.resize-nw, .resize-se { cursor: nwse-resize; }
-.resize-ne { top: -3px; right: -3px; } .resize-nw { top: -3px; left: -3px; }
-.resize-se { bottom: -3px; right: -3px; } .resize-sw { bottom: -3px; left: -3px; }
 </style>

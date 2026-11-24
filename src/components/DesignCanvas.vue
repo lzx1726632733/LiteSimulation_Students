@@ -70,6 +70,8 @@ import {
 } from "../utils/stations.js";
 import {getComponentPorts, getComponentPortPosition} from "../utils/componentPorts.js";
 import {getConnectionGeometry} from "../utils/connectionLine.js";
+import {clampCanvasOffset, clampCanvasPoint, encloseCanvasBounds, fitsCanvasBounds, getCanvasItemBounds, getCanvasMoveBounds} from "../utils/canvasBoundary.js";
+import {footprintsOverlap, getCollisionFootprint, resolveComponentDrag} from "../utils/componentCollision.js";
 import {
     DEFAULT_PATH_WIDTH,
     getPathWidth,
@@ -82,10 +84,16 @@ import {
     getPathBounds
 } from "../utils/agvPath.js";
 import {
+    RECTANGULAR_OBSTACLE_TYPE,
+    CIRCULAR_OBSTACLE_TYPE,
+    OBSTACLE_COMPONENT_TYPES,
     RESIZABLE_COMPONENT_TYPES,
     DEFAULT_COMPONENT_SHADOW_COLORS,
     DEFAULT_COMPONENT_SIZES
 } from "../utils/componentAppearance.js";
+import {getLocalTriangleVertices, getTriangleVertices, TRIANGULAR_OBSTACLE_TYPE} from "../utils/triangleObstacle.js";
+import {getWallGeometry, RECTANGULAR_WALL_TYPE} from "../utils/rectangularWall.js";
+import {hasWallRouteCollision} from "../utils/wallRoutes.js";
 
 // 定义 props
 const props = defineProps({
@@ -106,6 +114,7 @@ const props = defineProps({
         type: Boolean,
         default: true,
     },
+    canvasBoundary: {type: Object, default: null},
     // 当前在模型树中选中的控件 id
     selectedId: {
         type: String,
@@ -124,8 +133,11 @@ const emit = defineEmits([
     "component-placed",
     "select-component",
     "select-components",
+    "canvas-drag-start",
+    "canvas-drag-end",
     "update-component-position",
     "update-component-positions",
+    "resize-obstacle-edge",
     "update-component-properties",
     "rename-component",
 ]);
@@ -224,8 +236,11 @@ const dragOriginY = ref(0);
 // 是否发生过实际移动（用于区分”点击选中”与”拖拽移动”，避免多余日志/更新）
 const dragMoved = ref(false);
 let dragOrigins = [];
+let dragFootprint = null;
 let shiftClickId = null;
 let keepSelectionOnClick = false;
+const obstacleResize = ref(null);
+const hoveredObstacleAxis = ref(null);
 
 // 拖拽路径拐点的状态
 const draggingCorner = ref(false); // 是否正在拖拽拐点
@@ -296,6 +311,10 @@ const cursorStyle = computed(() => {
     if (connectionLineMode.value || agvPathMode.value) {
         return "crosshair";
     }
+    const resizeAxis = obstacleResize.value?.axis ?? hoveredObstacleAxis.value;
+    if (resizeAxis === 'vertex') return 'move';
+    if (resizeAxis === 'radius') return 'crosshair';
+    if (resizeAxis) return resizeAxis === 'x' ? 'ew-resize' : 'ns-resize';
     return "default";
 });
 
@@ -317,6 +336,7 @@ watch(
     () => props.activeControl,
     (newControl, oldControl) => {
         alignmentGuides.value = [];
+        hoveredObstacleAxis.value = null;
         const isLineMode = newControl?.type === "connectionLine";
         const wasLineMode = oldControl?.type === "connectionLine";
         const isAGVPathMode = newControl?.type === "AGVpath";
@@ -419,6 +439,37 @@ const drawGridLines = (ctx) => {
     ctx.stroke();   // 把前面加入路径的所有线条一次性画出来
 };
 
+const drawCanvasBoundary = (ctx) => {
+    const boundary = props.canvasBoundary;
+    if (!boundary) return;
+    const {x, y, width, height} = boundary;
+    const left = viewOffsetX.value + toPx(x);
+    const right = viewOffsetX.value + toPx(x + width);
+    const top = viewOffsetY.value + toScreenY(y + height);
+    const bottom = viewOffsetY.value + toScreenY(y);
+    const innerLeft = Math.max(0, left), innerRight = Math.min(canvasWidth.value, right);
+    const innerTop = Math.max(0, top), innerBottom = Math.min(canvasHeight.value, bottom);
+    const visible = innerRight > innerLeft && innerBottom > innerTop;
+
+    ctx.save();
+    ctx.fillStyle = "#11182748";
+    ctx.beginPath();
+    ctx.rect(0, 0, canvasWidth.value, canvasHeight.value);
+    if (visible) ctx.rect(innerLeft, innerTop, innerRight - innerLeft, innerBottom - innerTop);
+    ctx.fill("evenodd");
+    if (visible) {
+        ctx.strokeStyle = "#475569";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        if (left >= 0) { ctx.moveTo(left, innerTop); ctx.lineTo(left, innerBottom); }
+        if (right <= canvasWidth.value) { ctx.moveTo(right, innerTop); ctx.lineTo(right, innerBottom); }
+        if (top >= 0) { ctx.moveTo(innerLeft, top); ctx.lineTo(innerRight, top); }
+        if (bottom <= canvasHeight.value) { ctx.moveTo(innerLeft, bottom); ctx.lineTo(innerRight, bottom); }
+        ctx.stroke();
+    }
+    ctx.restore();
+};
+
 // 合并到动画帧重绘视口，避免缩放时创建整张模型大小的位图。
 const drawGridNow = () => {
     const ctx = syncCanvasSize();
@@ -438,6 +489,7 @@ const drawGridNow = () => {
     drawAlignmentGuides(ctx);   // 绘制拖动控件时的对齐参考线。
     drawSelectionBox(ctx);  // 绘制鼠标框选区域。
     ctx.restore();  // 恢复 save() 时的状态，撤销本次设置的裁剪和坐标平移；已经画出的内容不会被撤销。
+    drawCanvasBoundary(ctx);
     updateWorkpieceTooltip();
 };
 
@@ -615,7 +667,7 @@ const clearWorkpieceHover = () => {
 };
 
 const updateWorkpieceTooltip = () => {
-    if (!workpieceHoverPointer || !canvas.value || panning.value || dragging.value || draggingCorner.value ||
+    if (!workpieceHoverPointer || !canvas.value || panning.value || dragging.value || draggingCorner.value || obstacleResize.value ||
         selectionBox.value || workpieceHoverPointer.buttons || shouldShowCustomCursor.value ||
         connectionLineMode.value || agvPathMode.value) {
         hideWorkpieceTooltip();
@@ -664,6 +716,116 @@ const fmtMeters = (m) => String(+m.toPrecision(6));
 
 // 控件图标在屏幕上的最大尺寸（像素）。图标视觉大小固定，不随缩放/控件尺寸无限放大
 const ICON_SIZE_PX = 32;
+const OBSTACLE_HATCH_PITCH = 8 * Math.SQRT2; // 45° 斜线沿垂直于线条的方向间隔 8 CSS 像素。
+const getObstacleCornerRadius = (width, height) => Math.min(3.5, width / 4, height / 4);
+
+const drawObstacle = (ctx, {x, y, width, height}, {fillColor, selected = false, preview = false, points, circular,
+    handles = selected} = {}) => {
+    // 只为视口中可见的部分生成斜线。
+    const left = Math.max(x, -viewOffsetX.value);
+    const top = Math.max(y, -viewOffsetY.value);
+    const visibleWidth = Math.min(x + width, canvasWidth.value - viewOffsetX.value) - left;
+    const visibleHeight = Math.min(y + height, canvasHeight.value - viewOffsetY.value) - top;
+    if (visibleWidth <= 0 || visibleHeight <= 0) return;
+
+    ctx.save();
+    if (preview) ctx.globalAlpha = 0.65;
+    const centerX = x + width / 2, centerY = y + height / 2;
+    const traceOutline = () => {
+        ctx.beginPath();
+        if (circular) {
+            ctx.arc(centerX, centerY, width / 2, 0, Math.PI * 2);
+        } else {
+            ctx.moveTo(points[0].x, points[0].y);
+            ctx.lineTo(points[1].x, points[1].y);
+            ctx.lineTo(points[2].x, points[2].y);
+            ctx.closePath();
+        }
+    };
+
+    ctx.save();
+    if (points || circular) {
+        traceOutline();
+        ctx.clip();
+    }
+    ctx.fillStyle = fillColor || DEFAULT_COMPONENT_SHADOW_COLORS[RECTANGULAR_OBSTACLE_TYPE];
+    ctx.fillRect(left, top, visibleWidth, visibleHeight);
+
+    ctx.beginPath();
+    ctx.rect(left, top, visibleWidth, visibleHeight);
+    ctx.clip();
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    const phase = ((x - left + y - top) % OBSTACLE_HATCH_PITCH + OBSTACLE_HATCH_PITCH) % OBSTACLE_HATCH_PITCH;
+    for (let offset = phase; offset <= visibleWidth + visibleHeight; offset += OBSTACLE_HATCH_PITCH) {
+        ctx.moveTo(left + offset, top);
+        ctx.lineTo(left + offset - visibleHeight, top + visibleHeight);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = selected || preview ? "#2566fd" : "#334155";
+    ctx.lineWidth = selected ? 2 : 1;
+    if (preview) ctx.setLineDash([5, 3]);
+    if (points || circular) {
+        traceOutline();
+        ctx.stroke();
+    } else {
+        ctx.strokeRect(x, y, width, height);
+    }
+    if (handles) {
+        const radius = getObstacleCornerRadius(width, height);
+        const handles = points ?? (circular ? [
+            {x, y: centerY}, {x: x + width, y: centerY},
+            {x: centerX, y}, {x: centerX, y: y + height},
+        ] : [x, x + width].flatMap(cornerX =>
+            [y, y + height].map(cornerY => ({x: cornerX, y: cornerY}))));
+        ctx.fillStyle = "#2566fd";
+        ctx.beginPath();
+        for (const corner of handles) {
+            ctx.moveTo(corner.x + radius, corner.y);
+            ctx.arc(corner.x, corner.y, radius, 0, Math.PI * 2);
+        }
+        ctx.fill();
+        if (points && points.every((point, index) => {
+            const next = points[(index + 1) % points.length];
+            return Math.hypot(point.x - next.x, point.y - next.y) >= 28;
+        })) {
+            const centerX = points.reduce((sum, point) => sum + point.x, 0) / 3;
+            const centerY = points.reduce((sum, point) => sum + point.y, 0) / 3;
+            ctx.font = '11px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            points.forEach((point, index) => {
+                const dx = point.x - centerX, dy = point.y - centerY;
+                const distance = Math.hypot(dx, dy);
+                ctx.fillText('ABC'[index], point.x + dx / distance * 11, point.y + dy / distance * 11);
+            });
+        }
+    }
+    ctx.restore();
+};
+
+const triangleScreenPoints = component => getTriangleVertices(component).map(point => ({
+    x: toPx(point.x), y: toScreenY(point.y),
+}));
+
+const drawWall = (ctx, wall, options) => {
+    const {parts, exitPoints} = getWallGeometry(wall);
+    for (const {x, y, width, height} of parts) {
+        drawObstacle(ctx, {x: toPx(x), y: toScreenY(y + height), width: toPx(width), height: toPx(height)},
+            {...options, handles: false});
+    }
+    ctx.save();
+    ctx.fillStyle = '#16a34a';
+    for (const point of exitPoints) {
+        ctx.beginPath();
+        ctx.arc(toPx(point.x), toScreenY(point.y), 3, 0, Math.PI * 2);
+        ctx.fill();
+    }
+    ctx.restore();
+};
 
 // 绘制单个非连接线控件（普通控件 / 站点 / AGV 路径）。
 const drawSingleComponent = (ctx, component) => {
@@ -678,6 +840,11 @@ const drawSingleComponent = (ctx, component) => {
         drawNodeComponent(ctx, component);
         return;
     }
+    if (component.type === RECTANGULAR_WALL_TYPE) {
+        drawWall(ctx, component, {selected: isComponentSelected(component.id)});
+        drawComponentLabel(ctx, component);
+        return;
+    }
 
     // 控件矩形（世界坐标 → 像素）
     const bounds = getComponentFootprint(component);
@@ -685,6 +852,17 @@ const drawSingleComponent = (ctx, component) => {
     const py = toScreenY(bounds.y + bounds.height);
     const pw = toPx(bounds.width);
     const ph = toPx(bounds.height);
+
+    if (OBSTACLE_COMPONENT_TYPES.has(component.type)) {
+        drawObstacle(ctx, {x: px, y: py, width: pw, height: ph}, {
+            fillColor: component.shadowColor,
+            selected: isComponentSelected(component.id),
+            points: component.type === TRIANGULAR_OBSTACLE_TYPE ? triangleScreenPoints(component) : undefined,
+            circular: component.type === CIRCULAR_OBSTACLE_TYPE,
+        });
+        drawComponentLabel(ctx, component);
+        return;
+    }
 
     if (RESIZABLE_COMPONENT_TYPES.has(component.type)) {
         const shadowColor = component.shadowColor || DEFAULT_COMPONENT_SHADOW_COLORS[component.type];
@@ -1096,18 +1274,28 @@ const drawTempAGVPath = (ctx) => {
 const drawCursor = (ctx) => {
     const cx = toPx(cursorX.value);
     const cy = toScreenY(cursorY.value);
-    {
-        const size = DEFAULT_COMPONENT_SIZES[props.activeControl?.type] || {width: 3, height: 3};
-        const width = toPx(size.width);
-        const height = toPx(size.height);
+    const type = props.activeControl?.type;
+    const size = DEFAULT_COMPONENT_SIZES[type] ?? DEFAULT_STATION_SIZE;
+    const width = toPx(size.width);
+    const height = toPx(size.height);
+    const bounds = {x: cx - width / 2, y: cy - height / 2, width, height};
+    if (type === RECTANGULAR_WALL_TYPE) {
+        drawWall(ctx, {x: cursorX.value - size.width / 2, y: cursorY.value - size.height / 2, ...size},
+            {preview: true});
+    } else if (OBSTACLE_COMPONENT_TYPES.has(type)) {
+        const points = type === TRIANGULAR_OBSTACLE_TYPE
+            ? triangleScreenPoints({x: cursorX.value - size.width / 2, y: cursorY.value - size.height / 2})
+            : undefined;
+        drawObstacle(ctx, bounds, {preview: true, points, circular: type === CIRCULAR_OBSTACLE_TYPE});
+    } else {
         ctx.save();
-        const station = props.activeControl?.type === "node" ? getStationType(props.activeControl) : null;
+        const station = type === "node" ? getStationType(props.activeControl) : null;
         ctx.fillStyle = station?.fill || "rgba(37, 99, 235, 0.06)";
         ctx.strokeStyle = station?.color || "#2563eb";
         ctx.lineWidth = 1;
         ctx.setLineDash([5, 3]);
-        ctx.fillRect(cx - width / 2, cy - height / 2, width, height);
-        ctx.strokeRect(cx - width / 2, cy - height / 2, width, height);
+        ctx.fillRect(bounds.x, bounds.y, width, height);
+        ctx.strokeRect(bounds.x, bounds.y, width, height);
         ctx.restore();
     }
     const half = SMALL_GRID_SIZE / 2;
@@ -1144,6 +1332,9 @@ const getCanvasMousePosition = (e) => {
 // 普通移动步长为 0.01m；对齐控件时使用其精确坐标。
 const snapToStep = (value) =>
     Number((Math.round(value / SNAP_STEP) * SNAP_STEP).toFixed(10));
+
+const isInsideCanvas = (point) => fitsCanvasBounds({...point, width: 0, height: 0}, props.canvasBoundary);
+const snapCanvasPoint = (point, padding = 0) => clampCanvasPoint({x: snapToStep(point.x), y: snapToStep(point.y)}, props.canvasBoundary, padding);
 
 // 对齐按屏幕距离判断，避免缩放后吸附范围过大或难以触发。
 const alignToComponents = (raw, fallback, excludedIds, event, lockedAxis = null) => {
@@ -1193,13 +1384,32 @@ const alignToComponents = (raw, fallback, excludedIds, event, lockedAxis = null)
 
 // 预览和落点使用同一套计算，吸附后的中心位置就是实际放置位置。
 const getPlacementAnchor = (position, event) => {
-    const size = DEFAULT_COMPONENT_SIZES[props.activeControl?.type] || {width: 3, height: 3};
+    if (!isInsideCanvas(position)) return null;
+    const type = props.activeControl?.type;
+    const size = DEFAULT_COMPONENT_SIZES[type] ?? DEFAULT_STATION_SIZE;
     const raw = {x: position.x - size.width / 2, y: position.y - size.height / 2, ...size};
     const fallback = {
         ...size, x: snapToStep(position.x) - size.width / 2, y: snapToStep(position.y) - size.height / 2,
     };
     const aligned = alignToComponents(raw, fallback, new Set(), event);
-    return {x: aligned.x + size.width / 2, y: aligned.y + size.height / 2};
+    const obstacles = props.placedComponents.map(getCollisionFootprint).filter(Boolean);
+    const fit = ({x, y}) => {
+        const bounds = {...size, x, y};
+        const footprint = type === "node" ? bounds : getCollisionFootprint({...bounds, type});
+        const offset = clampCanvasOffset(footprint, {x: 0, y: 0}, props.canvasBoundary);
+        if (!offset) return null;
+        const adjusted = {...footprint, x: footprint.x + offset.x, y: footprint.y + offset.y};
+        return obstacles.some(obstacle => footprintsOverlap(adjusted, obstacle))
+            ? null : {...bounds, x: x + offset.x, y: y + offset.y};
+    };
+    // 吸附位置被占用时，仍允许在未吸附的空闲格点放置。
+    const placement = fit(aligned) ?? (aligned.x !== fallback.x || aligned.y !== fallback.y ? fit(fallback) : null);
+    if (!placement) {
+        alignmentGuides.value = [];
+        return null;
+    }
+    alignmentGuides.value = alignmentGuides.value.filter(guide => placement[guide.axis] === aligned[guide.axis]);
+    return {x: placement.x + size.width / 2, y: placement.y + size.height / 2};
 };
 
 const drawAlignmentGuides = (ctx) => {
@@ -1248,13 +1458,26 @@ const hitTestComponent = (x, y) => {
         if (component.type === "connectionLine" || component.type === "AGVpath") continue;
 
         const bounds = getComponentFootprint(component);
-        // 包括站点在内，按实际矩形区域命中。
         if (
             x >= bounds.x &&
             x <= bounds.x + bounds.width &&
             y >= bounds.y &&
             y <= bounds.y + bounds.height
         ) {
+            if (component.type === RECTANGULAR_WALL_TYPE && !getWallGeometry(component).parts.some(part =>
+                x >= part.x && x <= part.x + part.width && y >= part.y && y <= part.y + part.height)) continue;
+            if (component.type === CIRCULAR_OBSTACLE_TYPE) {
+                const radius = bounds.width / 2;
+                if (Math.hypot(x - bounds.x - radius, y - bounds.y - radius) > radius) continue;
+            }
+            if (component.type === TRIANGULAR_OBSTACLE_TYPE) {
+                const points = getTriangleVertices(component);
+                const signs = points.map((start, index) => {
+                    const end = points[(index + 1) % points.length];
+                    return (end.x - start.x) * (y - start.y) - (end.y - start.y) * (x - start.x);
+                });
+                if (signs.some(sign => sign > 0) && signs.some(sign => sign < 0)) continue;
+            }
             return component;
         }
     }
@@ -1489,6 +1712,16 @@ const createAGVPath = (endNode) => {
         segments: agvPathPoints.value.slice(1).map(() => ({type: "line", radius: 0})),
         // 每个拐点的圆角半径（不包括起点和终点站点）
     };
+    if (!fitsCanvasBounds(getCanvasItemBounds(agvPath), props.canvasBoundary)) {
+        agvPathPoints.value.pop();
+        emit("add-log", "有限画布：AGV 通道需要留在边界内。");
+        return;
+    }
+    if (hasWallRouteCollision(props.placedComponents, [agvPath])) {
+        agvPathPoints.value.pop();
+        emit("add-log", "AGV 路径：通道必须从有足够宽度的围墙出口通过。");
+        return;
+    }
 
     // 通知父组件新增控件
     emit("component-placed", agvPath);
@@ -1605,6 +1838,59 @@ const drawSelectionBox = (ctx) => {
     ctx.restore();
 };
 
+const hitTestObstacleBorder = (point) => {
+    const margin = toMeters(5);
+    for (let i = props.placedComponents.length - 1; i >= 0; i--) {
+        const item = props.placedComponents[i];
+        if (!isComponentSelected(item.id)) continue;
+        if (item.type === CIRCULAR_OBSTACLE_TYPE) {
+            const center = getComponentCenter(item);
+            const radius = getComponentFootprint(item).width / 2;
+            const grabRadius = Math.hypot(point.x - center.x, point.y - center.y);
+            if (Math.abs(grabRadius - radius) <= Math.min(margin, radius / 2)) {
+                return {id: item.id, axis: 'radius', center, radius, grabRadius};
+            }
+            continue;
+        }
+        if (item.type === TRIANGULAR_OBSTACLE_TYPE) {
+            const points = getTriangleVertices(item);
+            const distances = points.map(vertex => Math.hypot(vertex.x - point.x, vertex.y - point.y));
+            const nearest = Math.min(...distances);
+            if (nearest <= toMeters(7)) {
+                const index = distances.indexOf(nearest);
+                return {id: item.id, axis: 'vertex', index, vertex: points[index]};
+            }
+            const onEdge = points.some((start, index) => {
+                const end = points[(index + 1) % points.length];
+                const length = Math.hypot(end.x - start.x, end.y - start.y);
+                return distanceToPathSegment({type: 'line', start, end, length}, point.x, point.y) <= toMeters(2);
+            });
+            if (onEdge) return {id: item.id};
+            continue;
+        }
+        if (item.type !== RECTANGULAR_OBSTACLE_TYPE) continue;
+        const {x, y, width, height} = getComponentFootprint(item);
+        const right = x + width, top = y + height;
+        const leftGap = Math.abs(point.x - x), rightGap = Math.abs(point.x - right);
+        const bottomGap = Math.abs(point.y - y), topGap = Math.abs(point.y - top);
+        const gapX = Math.min(leftGap, rightGap), gapY = Math.min(bottomGap, topGap);
+        const cornerRadius = toMeters(getObstacleCornerRadius(toPx(width), toPx(height)) * 1.35);
+        // 角点只是轮廓标记，优先消耗命中，避免被当作边或整个障碍物的拖动起点。
+        if (Math.hypot(gapX, gapY) <= cornerRadius) return {id: item.id};
+        const vertical = gapX <= margin && point.y >= y && point.y <= top;
+        const horizontal = gapY <= margin && point.x >= x && point.x <= right;
+        if (vertical && (!horizontal || gapX <= gapY)) {
+            return leftGap <= rightGap ? {id: item.id, axis: 'x', direction: -1, edge: x}
+                : {id: item.id, axis: 'x', direction: 1, edge: right};
+        }
+        if (horizontal) {
+            return bottomGap <= topGap ? {id: item.id, axis: 'y', direction: -1, edge: y}
+                : {id: item.id, axis: 'y', direction: 1, edge: top};
+        }
+    }
+    return null;
+};
+
 const toggleComponentSelection = (id) => {
     const ids = [...selectedIdSet.value];
     emit("select-components", isComponentSelected(id) ? ids.filter((selected) => selected !== id) : [...ids, id]);
@@ -1614,6 +1900,25 @@ function clearConnectionDraft() {
     firstPort.value = null;
     connectionWaypoints.value = [];
     tempLineEnd.value = null;
+}
+
+function undoDraftPoint() {
+    if (firstPort.value) {
+        if (connectionWaypoints.value.length) {
+            connectionWaypoints.value.pop();
+            tempLineEnd.value = null;
+        } else {
+            clearConnectionDraft();
+        }
+    } else if (agvStartNode.value) {
+        agvPathPoints.value.pop();
+        tempAGVPoint.value = null;
+        if (!agvPathPoints.value.length) agvStartNode.value = null;
+    } else {
+        return false;
+    }
+    drawGrid();
+    return true;
 }
 
 const cancelConnectionDraft = () => {
@@ -1651,7 +1956,7 @@ const placeConnectionPoint = (position) => {
     const first = firstPort.value;
     if (!port) {
         if (first) {
-            const point = {x: snapToStep(position.x), y: snapToStep(position.y)};
+            const point = snapCanvasPoint(position);
             const last = connectionWaypoints.value.at(-1) ?? getComponentPortPosition(first.component, first.key);
             if (Math.hypot(point.x - last.x, point.y - last.y) > 1e-9) connectionWaypoints.value.push(point);
             tempLineEnd.value = point;
@@ -1682,6 +1987,14 @@ const placeConnectionPoint = (position) => {
         fromId: from.id, toId: to.id, fromName: getComponentLabel(from), toName: getComponentLabel(to),
         waypoints,
     };
+    if (!fitsCanvasBounds(getCanvasItemBounds(line), props.canvasBoundary)) {
+        emit("add-log", "有限画布：连接线拐点需要留在边界内。");
+        return;
+    }
+    if (hasWallRouteCollision(props.placedComponents, [line])) {
+        emit("add-log", "连接线：请从围墙出口通过。");
+        return;
+    }
     emit("component-placed", line);
     emit("add-log", '新建对象，类型：connectionLine，编号：连接线' + index + '，连接：' + line.fromName + ' → ' + line.toName);
     clearConnectionDraft();
@@ -1698,7 +2011,7 @@ const handleMouseDown = async (e) => {
         return;
     }
     if (e.button !== 0 && e.button !== 1) return;
-    if (panning.value || selectionBox.value || dragging.value || draggingCorner.value) return;
+    if (panning.value || selectionBox.value || dragging.value || draggingCorner.value || obstacleResize.value) return;
     // 对齐参考线
     alignmentGuides.value = [];
     // 点击画布先结束文字编辑，避免聚焦引发 blur 后误放置新控件。
@@ -1722,12 +2035,17 @@ const handleMouseDown = async (e) => {
     // AGV 路径模式：点击站点开始绘制，左键添加拐点，点击站点结束
     if (agvPathMode.value) {
         const pos = getCanvasMousePosition(e);
+        if (!isInsideCanvas(pos)) return;
         const hit = hitTestComponent(pos.x, pos.y);
 
         // 如果还没有起点站点，必须先点击站点
         if (!agvStartNode.value) {
             if (!hit || hit.type !== "node") {
                 emit("add-log", "AGV 路径：请点击起点站点");
+                return;
+            }
+            if (!fitsCanvasBounds(getCanvasItemBounds({type: 'AGVpath', nodes: [hit]}), props.canvasBoundary)) {
+                emit("add-log", "有限画布：起点附近没有足够空间放置 AGV 通道。");
                 return;
             }
 
@@ -1768,28 +2086,34 @@ const handleMouseDown = async (e) => {
 
         // 点击空白处或其他控件：添加拐点
         // 对齐到小网格线交点
-        const pointX = snapToStep(pos.x);
-        const pointY = snapToStep(pos.y);
-
-        const finalX = pointX;
-        const finalY = pointY;
+        const point = snapCanvasPoint(pos, DEFAULT_PATH_WIDTH / 2);
+        if (!point) return;
 
         // 添加拐点到路径（世界坐标，米）
-        agvPathPoints.value.push({x: finalX, y: finalY});
-        emit("add-log", `AGV 路径：添加拐点 (${fmtMeters(finalX)}, ${fmtMeters(finalY)}) m`);
+        agvPathPoints.value.push(point);
+        emit("add-log", `AGV 路径：添加拐点 (${fmtMeters(point.x)}, ${fmtMeters(point.y)}) m`);
 
         drawGrid();
         return;
     }
 
     if (connectionLineMode.value) {
-        placeConnectionPoint(getCanvasMousePosition(e));
+        const pos = getCanvasMousePosition(e);
+        if (isInsideCanvas(pos)) placeConnectionPoint(pos);
         return;
     }
 
     // 选择模式：左键拖动控件，空白处开始框选。
     if (!shouldShowCustomCursor.value) {
         const pos = getCanvasMousePosition(e);
+        const border = !e.shiftKey && hitTestObstacleBorder(pos);
+        if (border) {
+            if (border.axis) {
+                obstacleResize.value = {...border, grab: pos};
+                emit('canvas-drag-start');
+            }
+            return;
+        }
 
         const selected = props.placedComponents.find(item => item.id === props.selectedId);
         let cornerHit = hitTestConnectionCorner(selected, pos.x, pos.y, true) ?? hitTestAGVCorner(pos.x, pos.y);
@@ -1809,6 +2133,7 @@ const handleMouseDown = async (e) => {
             dragOffsetX.value = pos.x - corner.x;
             dragOffsetY.value = pos.y - corner.y;
             if (!isComponentSelected(hit.id)) emit('select-component', hit.id);
+            emit("canvas-drag-start");
             return;
         }
 
@@ -1861,8 +2186,10 @@ const handleMouseDown = async (e) => {
                     type: item.type,
                     x: item.x,
                     y: item.y,
-                    bounds: getComponentFootprint(item)
+                    bounds: getCollisionFootprint(item) ?? getComponentFootprint(item)
                 }));
+            dragFootprint = getCanvasMoveBounds(new Set(dragOrigins.map(item => item.id)), props.placedComponents);
+            emit("canvas-drag-start");
         } else {
             emit("select-component", hit.id);
         }
@@ -1872,6 +2199,10 @@ const handleMouseDown = async (e) => {
     // 使用点击时的世界坐标，平移或恢复全局视图后无需先移动鼠标。
     const position = getCanvasMousePosition(e);
     const anchor = getPlacementAnchor(position, e);
+    if (!anchor) {
+        if (isInsideCanvas(position)) emit("add-log", "无法放置：这里没有足够的空闲空间。");
+        return;
+    }
     const anchorX = anchor.x;
     const anchorY = anchor.y;
 
@@ -1919,8 +2250,8 @@ const handleMouseDown = async (e) => {
     }
 
     // 其他控件：由中心反推左下角（默认真实尺寸，米）
-    const defaultSize =
-        DEFAULT_COMPONENT_SIZES[props.activeControl.type] || {width: 3, height: 3};
+    const type = props.activeControl.type;
+    const defaultSize = DEFAULT_COMPONENT_SIZES[type] ?? DEFAULT_STATION_SIZE;
     const componentX = anchorX - defaultSize.width / 2;
     const componentY = anchorY - defaultSize.height / 2;
 
@@ -1928,7 +2259,13 @@ const handleMouseDown = async (e) => {
     const finalY = componentY;
 
     // 预加载图片
-    await preloadImage(props.activeControl.icon);
+    const triangleVertices = type === TRIANGULAR_OBSTACLE_TYPE ? getLocalTriangleVertices({}) : undefined;
+    if (!OBSTACLE_COMPONENT_TYPES.has(type)) await preloadImage(props.activeControl.icon);
+    const bounds = getCollisionFootprint({...defaultSize, type, x: finalX, y: finalY, triangleVertices});
+    if (!fitsCanvasBounds(bounds, props.canvasBoundary) || props.placedComponents.some(item => {
+        const obstacle = getCollisionFootprint(item);
+        return obstacle && footprintsOverlap(bounds, obstacle);
+    })) return;
 
     // 计算同类型控件的序号（填补被删除控件留下的空缺）
     const index = getNextIndexForType(props.activeControl.type);
@@ -1937,7 +2274,7 @@ const handleMouseDown = async (e) => {
     const id = createComponentId();
 
     // 通知父组件新增控件（父组件维护 placedComponents 单一数据源，模型树共享）
-    emit("component-placed", {
+    const component = {
         id,
         type: props.activeControl.type,
         name: props.activeControl.name,
@@ -1949,7 +2286,13 @@ const handleMouseDown = async (e) => {
         width: defaultSize.width,
         height: defaultSize.height,
         shadowColor: DEFAULT_COMPONENT_SHADOW_COLORS[props.activeControl.type],
-    });
+        ...(triangleVertices ? {triangleVertices} : {}),
+    };
+    if (type === RECTANGULAR_WALL_TYPE && hasWallRouteCollision(props.placedComponents, [component])) {
+        emit("add-log", "无法放置：墙体会挡住已有的连接线或 AGV 路径。");
+        return;
+    }
+    emit("component-placed", component);
 
     // 输出日志：新建对象，类型：<type>，编号：<name><序号>
     emit(
@@ -1971,6 +2314,7 @@ const handleMouseMove = (e) => {
     workpieceHoverPointer = {clientX: e.clientX, clientY: e.clientY, buttons: e.buttons ?? 0};
     updateWorkpieceTooltip();
     alignmentGuides.value = [];
+    hoveredObstacleAxis.value = null;
     if (panning.value && panStart) {
         viewOrigin.value = {
             x: panStart.origin.x - (e.clientX - panStart.x) / ppm.value,
@@ -1982,6 +2326,24 @@ const handleMouseMove = (e) => {
     const pos = getCanvasMousePosition(e);
     if (selectionBox.value) {
         updateSelectionBox(pos);
+        return;
+    }
+
+    if (obstacleResize.value) {
+        const {id, axis, direction, edge, grab, index, vertex, center, radius, grabRadius} = obstacleResize.value;
+        if (axis === 'vertex') {
+            const point = clampCanvasPoint({
+                x: vertex.x + snapToStep(pos.x - grab.x),
+                y: vertex.y + snapToStep(pos.y - grab.y),
+            }, props.canvasBoundary);
+            if (point) emit('update-component-position', {id, triangleVertex: {index, point}});
+        } else if (axis === 'radius') {
+            const delta = Math.hypot(pos.x - center.x, pos.y - center.y) - grabRadius;
+            emit('resize-obstacle-edge', {id, axis, radius: radius + snapToStep(delta)});
+        } else {
+            emit('resize-obstacle-edge', {id, axis, direction, coordinate: edge + snapToStep(pos[axis] - grab[axis])});
+        }
+        drawGrid();
         return;
     }
 
@@ -2009,8 +2371,9 @@ const handleMouseMove = (e) => {
             }
         }
 
-        if (corner.x === newX && corner.y === newY) return;
-        const point = {x: newX, y: newY};
+        const padding = path.type === 'AGVpath' ? getPathWidth(path) / 2 : 0;
+        const point = clampCanvasPoint({x: newX, y: newY}, props.canvasBoundary, padding);
+        if (!point || (corner.x === point.x && corner.y === point.y)) return;
         if (path.type === 'connectionLine') {
             emit('update-component-position', {id: path.id, connectionCorner: {index, point}});
         } else {
@@ -2026,18 +2389,15 @@ const handleMouseMove = (e) => {
     // AGV 路径模式且已选中起点站点：更新临时预览点
     if (agvPathMode.value && agvStartNode.value) {
         const station = hitTestComponent(pos.x, pos.y);
-        const nodeX = station?.type === "node" ? station.x : snapToStep(pos.x);
-        const nodeY = station?.type === "node" ? station.y : snapToStep(pos.y);
-        tempAGVPoint.value = {
-            x: nodeX,
-            y: nodeY
-        };
+        tempAGVPoint.value = station?.type === "node"
+            ? clampCanvasPoint({x: station.x, y: station.y}, props.canvasBoundary, DEFAULT_PATH_WIDTH / 2)
+            : snapCanvasPoint(pos, DEFAULT_PATH_WIDTH / 2);
         drawGrid();
         return;
     }
 
     if (connectionLineMode.value && firstPort.value) {
-        tempLineEnd.value = findConnectionPort(pos)?.point ?? pos;
+        tempLineEnd.value = findConnectionPort(pos)?.point ?? clampCanvasPoint(pos, props.canvasBoundary);
         drawGrid();
         return;
     }
@@ -2070,19 +2430,24 @@ const handleMouseMove = (e) => {
         }
 
         // 对整组外接矩形吸附，所有成员始终使用同一位移。
-        const minX = Math.min(...dragOrigins.map((item) => item.bounds.x));
-        const minY = Math.min(...dragOrigins.map((item) => item.bounds.y));
-        const size = {
-            width: Math.max(...dragOrigins.map((item) => item.bounds.x + item.bounds.width)) - minX,
-            height: Math.max(...dragOrigins.map((item) => item.bounds.y + item.bounds.height)) - minY,
-        };
+        const {x: minX, y: minY, width, height} = encloseCanvasBounds(dragOrigins.map(item => item.bounds));
+        const movingIds = new Set(dragOrigins.map(item => item.id));
         const aligned = alignToComponents(
-            {...size, x: minX + rawX - dragOriginX.value, y: minY + rawY - dragOriginY.value},
-            {...size, x: minX + newX - dragOriginX.value, y: minY + newY - dragOriginY.value},
-            new Set(dragOrigins.map((item) => item.id)), e, lockedAxis,
+            {width, height, x: minX + rawX - dragOriginX.value, y: minY + rawY - dragOriginY.value},
+            {width, height, x: minX + newX - dragOriginX.value, y: minY + newY - dragOriginY.value},
+            movingIds, e, lockedAxis,
         );
-        newX = Number((dragOriginX.value + aligned.x - minX).toFixed(10));
-        newY = Number((dragOriginY.value + aligned.y - minY).toFixed(10));
+        const offset = {x: aligned.x - minX, y: aligned.y - minY};
+        const bounded = clampCanvasOffset(dragFootprint, offset, props.canvasBoundary);
+        if (!bounded) return;
+        const from = {x: draggedComponent.x - dragOriginX.value, y: draggedComponent.y - dragOriginY.value};
+        const moving = dragOrigins.map(({bounds}) => ({...bounds, x: bounds.x + from.x, y: bounds.y + from.y}));
+        const obstacles = props.placedComponents.filter(item => !movingIds.has(item.id)).map(getCollisionFootprint).filter(Boolean);
+        const traveled = resolveComponentDrag(moving, obstacles, {x: bounded.x - from.x, y: bounded.y - from.y});
+        const allowed = {x: from.x + traveled.x, y: from.y + traveled.y};
+        alignmentGuides.value = alignmentGuides.value.filter(guide => Math.abs(offset[guide.axis] - allowed[guide.axis]) < 1e-8);
+        newX = Number((dragOriginX.value + allowed.x).toFixed(10));
+        newY = Number((dragOriginY.value + allowed.y).toFixed(10));
 
         if (newX === draggedComponent.x && newY === draggedComponent.y) {
             drawGrid();
@@ -2108,10 +2473,13 @@ const handleMouseMove = (e) => {
     }
 
     const shouldShow = shouldShowCustomCursor.value;
+    if (!shouldShow && !e.shiftKey) hoveredObstacleAxis.value = hitTestObstacleBorder(pos)?.axis ?? null;
     const anchor = shouldShow ? getPlacementAnchor(pos, e) : {x: snapToStep(pos.x), y: snapToStep(pos.y)};
-    cursorX.value = anchor.x;
-    cursorY.value = anchor.y;
-    showCursor.value = shouldShow;
+    if (anchor) {
+        cursorX.value = anchor.x;
+        cursorY.value = anchor.y;
+    }
+    showCursor.value = shouldShow && !!anchor;
 
     drawGrid();
 };
@@ -2121,11 +2489,10 @@ const endDrag = () => {
         dragOrigins.forEach((origin) => {
             const moved = props.placedComponents.find((item) => item.id === origin.id);
             if (!moved || (moved.x === origin.x && moved.y === origin.y)) return;
-            const halfW = moved.type === "node" ? 0 : (moved.width ?? 0) / 2;
-            const halfH = moved.type === "node" ? 0 : (moved.height ?? 0) / 2;
+            const center = getComponentCenter(moved);
             emit("add-log", `移动对象，编号：${getComponentLabel(moved)}` +
-                `，中心点物理坐标：(${fmtMeters(origin.x + halfW)} m, ${fmtMeters(origin.y + halfH)} m)` +
-                ` → (${fmtMeters(moved.x + halfW)} m, ${fmtMeters(moved.y + halfH)} m)`);
+                `，中心点物理坐标：(${fmtMeters(center.x + (origin.x - moved.x))} m, ${fmtMeters(center.y + (origin.y - moved.y))} m)` +
+                ` → (${fmtMeters(center.x)} m, ${fmtMeters(center.y)} m)`);
         });
     } else if (shiftClickId) {
         toggleComponentSelection(shiftClickId);
@@ -2136,26 +2503,22 @@ const endDrag = () => {
     dragId.value = null;
     dragMoved.value = false;
     dragOrigins = [];
+    dragFootprint = null;
     shiftClickId = null;
     keepSelectionOnClick = false;
 };
 
-const handleMouseUp = (e) => {
+const finishCanvasDrag = () => {
+    if (!draggingCorner.value && !dragging.value && !obstacleResize.value) return;
     if (alignmentGuides.value.length) {
         alignmentGuides.value = [];
         drawGrid();
     }
-    if (selectionBox.value) {
-        if (Number.isFinite(e?.clientX) && Number.isFinite(e?.clientY)) {
-            updateSelectionBox(getCanvasMousePosition(e));
-        }
-        selectionBox.value = null;
-        drawGrid();
-    }
-    panning.value = false;
-    panStart = null;
     // 结束拐点拖拽
-    if (draggingCorner.value) {
+    if (obstacleResize.value) {
+        obstacleResize.value = null;
+        hoveredObstacleAxis.value = null;
+    } else if (draggingCorner.value) {
         const path = props.placedComponents.find((c) => c.id === dragPathId.value);
         const corner = getDraggablePathCorner(path, dragCornerIndex.value);
         if (corner) {
@@ -2175,13 +2538,27 @@ const handleMouseUp = (e) => {
         draggingCorner.value = false;
         dragPathId.value = null;
         dragCornerIndex.value = null;
-        return;
-    }
-
-    // 结束控件拖拽
-    if (dragging.value) {
+    } else {
         endDrag();
     }
+    emit("canvas-drag-end");
+};
+
+const handleMouseUp = (e) => {
+    if (alignmentGuides.value.length) {
+        alignmentGuides.value = [];
+        drawGrid();
+    }
+    if (selectionBox.value) {
+        if (Number.isFinite(e?.clientX) && Number.isFinite(e?.clientY)) {
+            updateSelectionBox(getCanvasMousePosition(e));
+        }
+        selectionBox.value = null;
+        drawGrid();
+    }
+    panning.value = false;
+    panStart = null;
+    finishCanvasDrag();
 };
 
 const handlePointerCancel = () => {
@@ -2193,6 +2570,7 @@ const handlePointerCancel = () => {
 const handleMouseLeave = () => {
     clearWorkpieceHover();
     alignmentGuides.value = [];
+    hoveredObstacleAxis.value = null;
     // 鼠标离开画布时隐藏自定义光标
     mouseInsideCanvas.value = false;
     showCursor.value = false;
@@ -2223,7 +2601,7 @@ const handleMouseEnter = (event) => {
 
 // 缩放只改变视图，鼠标下面的世界坐标保持不变。
 const handleWheel = (e) => {
-    if (panning.value || selectionBox.value || dragging.value || draggingCorner.value) return;
+    if (panning.value || selectionBox.value || dragging.value || draggingCorner.value || obstacleResize.value) return;
     const rect = canvas.value.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -2249,8 +2627,8 @@ const centerOrigin = () => {
 };
 
 // 按指定对象的真实范围适配视图，全局恢复和模型树定位共用。
-const fitComponentsInView = (components, maxScale = 100, minExtent = 3) => {
-    const points = [];
+const fitComponentsInView = (components, {maxScale = 100, minExtent = 3, boundary = null} = {}) => {
+    const points = boundary ? [boundary, {x: boundary.x + boundary.width, y: boundary.y + boundary.height}] : [];
     let labelPadding = 48;
     const ctx = canvas.value?.getContext("2d");
     if (ctx) ctx.font = LABEL_FONT;
@@ -2301,7 +2679,7 @@ const resetZoom = () => {
     alignmentGuides.value = [];
     if (editingId.value) commitLabelEdit();
     const visibleParts = (props.workpieces ?? []).filter(part => !part.stackHidden);
-    if (!fitComponentsInView([...props.placedComponents, ...visibleParts])) centerOrigin();
+    if (!fitComponentsInView([...props.placedComponents, ...visibleParts], {boundary: props.canvasBoundary})) centerOrigin();
     showCursor.value = false;
     drawGrid();
 };
@@ -2315,15 +2693,19 @@ const focusComponent = (id) => {
     const targets = component.type === "connectionLine"
         ? [component, ...props.placedComponents.filter((item) => item.id === component.fromId || item.id === component.toId)]
         : [component];
-    if (!fitComponentsInView(targets, MAX_PPM, 1)) return;
+    if (!fitComponentsInView(targets, {maxScale: MAX_PPM, minExtent: 1})) return;
     showCursor.value = false;
     drawGrid();
 };
 
-defineExpose({resetZoom, focusComponent});
+defineExpose({resetZoom, focusComponent, undoDraftPoint, finishCanvasDrag});
 
 watch(() => props.workpieces, () => drawGrid());
 watch(() => props.showCoordinateSystem, () => drawGrid());
+watch(() => props.canvasBoundary, () => {
+    showCursor.value = false;
+    drawGrid();
+});
 
 // 已放置控件或选中项变化时（含模型树的删除、选中），重绘画布
 watch(

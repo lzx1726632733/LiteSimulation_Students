@@ -233,6 +233,75 @@
                     </div>
 
                 </div>
+                <div v-if="wallSettings" :key="selectedItem.id" class="prop-section">
+                    <div class="section-title">矩形墙属性</div>
+                    <div v-for="field in wallNumericFields" :key="field.key" class="prop-row dimension-row">
+                        <label class="prop-key" :for="`wall-${field.key}`">{{ field.label }}</label>
+                        <input :id="`wall-${field.key}`" class="property-input" type="number" step="any"
+                               :value="wallSettings[field.key]" @blur="handleWallNumber(field.key, $event)"
+                               @keydown.enter.prevent="$event.target.blur()"/>
+                        <span class="property-unit">m</span>
+                    </div>
+                    <div class="prop-row wall-thickness-row">
+                        <label class="prop-key" for="wall-thickness-mode">厚度方向</label>
+                        <select id="wall-thickness-mode" class="property-input" :value="wallSettings.wallThicknessMode"
+                                @change="handleWallThicknessMode">
+                            <option v-for="mode in WALL_THICKNESS_MODES" :key="mode.value" :value="mode.value">
+                                {{ mode.label }}
+                            </option>
+                        </select>
+                    </div>
+                    <table class="shape-properties-table" aria-label="矩形墙出口">
+                        <thead>
+                            <tr><th scope="col">序号</th><th scope="col">出口位置</th><th scope="col">出口宽度</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(exit, index) in wallSettings.wallExits" :key="index">
+                                <th scope="row">{{ index + 1 }}</th>
+                                <td>{{ WALL_SIDES.find(side => side.value === exit.side)?.label }}</td>
+                                <td>{{ exit.width }} m</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="assembly-actions">
+                        <button type="button" @click="emit('open-dialog', {itemId: selectedItem.id, dialogType: 'wall-exits'})">
+                            编辑表格
+                        </button>
+                    </div>
+                </div>
+                <div v-if="circleRadius !== null" class="prop-section">
+                    <div class="section-title">圆形属性</div>
+                    <div class="prop-row dimension-row">
+                        <label class="prop-key" for="circle-radius">半径</label>
+                        <input id="circle-radius" :key="selectedItem.id" class="property-input" type="number"
+                               :min="MIN_CIRCLE_RADIUS" step="any" :value="circleRadius"
+                               @blur="handleCircleRadiusBlur" @keydown.enter.prevent="$event.target.blur()"/>
+                        <span class="property-unit">m</span>
+                    </div>
+                </div>
+                <div v-if="triangleParameters" class="prop-section">
+                    <div class="section-title">三角形属性</div>
+                    <table class="shape-properties-table" aria-label="三角形属性">
+                        <thead>
+                            <tr>
+                                <th scope="col">参数</th>
+                                <th scope="col">值</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="field in TRIANGLE_FIELDS" :key="field.key">
+                                <th scope="row">{{ field.shortLabel ?? field.label }}</th>
+                                <td>{{ formatTriangleValue(triangleParameters[field.key]) }} {{ field.unit }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="assembly-actions">
+                        <button type="button"
+                                @click="emit('open-dialog', {itemId: selectedItem.id, dialogType: 'triangle-definition'})">
+                            定义三角形
+                        </button>
+                    </div>
+                </div>
                 <!-- 矩形控件独特功能 -->
                 <div class="prop-section" >
                     <!--  输入控件  -->
@@ -458,7 +527,6 @@
                         </div>
                     </div>
                 </div>
-
             </div>
         </div>
     </div>
@@ -471,7 +539,9 @@ import {STATION_TYPES, getStationType, getComponentFootprint, getComponentCenter
 import clockwiseIcon from "../assets/icons/clockwise.svg";
 import anticlockwiseIcon from "../assets/icons/anticlockwise.svg";
 import {getPathWidth} from "../utils/agvPath.js";
-import {RESIZABLE_COMPONENT_TYPES, getDefaultShadowColor} from "../utils/componentAppearance.js";
+import {CIRCULAR_OBSTACLE_TYPE, getCircleRadius, getDefaultShadowColor, MIN_CIRCLE_RADIUS, RESIZABLE_COMPONENT_TYPES} from "../utils/componentAppearance.js";
+import {formatTriangleValue, getLocalTriangleVertices, getTriangleParameters, TRIANGLE_FIELDS, TRIANGULAR_OBSTACLE_TYPE} from "../utils/triangleObstacle.js";
+import {getWallSettings, RECTANGULAR_WALL_TYPE, WALL_SIDES, WALL_THICKNESS_MODES} from "../utils/rectangularWall.js";
 import {INPUT_ENTITY_TYPES, INPUT_PROPERTY_DEFAULTS, getInputType, isValidInputProperty, parseGenerationInterval, formatGenerationInterval} from "../utils/inputRules.js";
 import {WORKSTATION_PROPERTY_DEFAULTS, PARALLEL_WORKSTATION_PROPERTY_DEFAULTS, isValidWorkstationProperty, isValidParallelWorkstationProperty} from "../utils/workstationProperties.js";
 import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry} from "../utils/connectionLine.js";
@@ -491,8 +561,44 @@ const props = defineProps({
         type: Array,
         default: () => [],
     },
+    canvasBoundary: {type: Object, default: null},
 });
 const emit = defineEmits(["update-component-properties", "update-component-position", "open-dialog"]);
+const wallSettings = computed(() => props.selectedItem?.type === RECTANGULAR_WALL_TYPE
+    ? getWallSettings(props.selectedItem) : null);
+const wallNumericFields = [
+    {key: 'width', label: '长度'}, {key: 'height', label: '宽度'}, {key: 'wallThickness', label: '墙体厚度'},
+];
+
+function handleWallNumber(field, event) {
+    const input = event.target;
+    const value = Number(input.value);
+    if (Number.isFinite(value) && value > 0 && value !== wallSettings.value[field]) {
+        emit("update-component-properties", {id: props.selectedItem.id, [field]: value});
+    }
+    input.value = String(wallSettings.value[field]);
+}
+
+function handleWallThicknessMode(event) {
+    emit("update-component-properties", {id: props.selectedItem.id, wallThicknessMode: event.target.value});
+    event.target.value = wallSettings.value.wallThicknessMode;
+}
+
+const circleRadius = computed(() => props.selectedItem?.type === CIRCULAR_OBSTACLE_TYPE
+    ? Number(getCircleRadius(props.selectedItem).toPrecision(8)) : null);
+
+function handleCircleRadiusBlur(event) {
+    const input = event.target;
+    const radius = Number(input.value);
+    if (circleRadius.value === null) return;
+    if (Number.isFinite(radius) && radius >= MIN_CIRCLE_RADIUS && radius !== circleRadius.value) {
+        emit("update-component-properties", {id: props.selectedItem.id, circleRadius: radius});
+    }
+    input.value = String(circleRadius.value);
+}
+
+const triangleParameters = computed(() => props.selectedItem?.type === TRIANGULAR_OBSTACLE_TYPE
+    ? getTriangleParameters(getLocalTriangleVertices(props.selectedItem)) : null);
 const bufferCapacity = computed(() => getBufferProperty(props.selectedItem, 'bufferCapacity'));
 const minimumStayTime = computed(() => getBufferProperty(props.selectedItem, 'minimumStayTime'));
 const componentPorts = computed(() => getComponentPorts(props.selectedItem).map(port => ({
@@ -758,6 +864,7 @@ const handlePathWidthChange = (event) => {
     const width = raw && Number.isFinite(value) ? Math.max(0.01, Number(value.toFixed(2))) : getPathWidth(item);
     event.target.value = String(width);
     if (width !== getPathWidth(item)) emit("update-component-properties", {id: item.id, pathWidth: width});
+    if (props.canvasBoundary) event.target.value = String(getPathWidth(item));
 };
 const stationStyle = computed(() => getStationType(props.selectedItem));
 const handleStationTypeChange = (event) => {
@@ -800,11 +907,11 @@ const handleCenterCoordinateChange = (axis, event) => {
     event.target.value = String(value);
     if (value === centerCoordinates.value[axis]) return;
     const position = {id: item.id, x: item.x, y: item.y};
-    const dimension = axis === "x" ? "width" : "height";
-    const offset = item.type === "node" ? 0 : (item[dimension] ?? 0) / 2;
+    const offset = getComponentCenter(item)[axis] - item[axis];
     position[axis] = Number((value - offset).toFixed(10));
     // 共用拖动的更新事件，使站点关联的 AGV 路径也同步更新。
     emit("update-component-position", position);
+    event.target.value = String(centerCoordinates.value[axis]);
 };
 
 const isResizableComponent = computed(() =>
@@ -829,6 +936,7 @@ function modelDimension(dimension) {
 }
 
 const handleDimensionChange = (dimension, event) => {
+    if (props.canvasBoundary) return;
     const inputValue = Number(event.target.value);
     // 允许用户输入过程中的任意值（米），不做限制
     if (!isNaN(inputValue) && inputValue > 0) {
@@ -840,9 +948,11 @@ const handleDimensionBlur = (dimension, event) => {
     const inputValue = Number(event.target.value);
     // 失焦时应用最小值限制（0.01 米）
     const meters = Math.max(0.01, inputValue || 0.01);
-    if (meters !== inputValue) {
+    const current = dimension === 'width' ? widthInMeters : heightInMeters;
+    if (Number.isFinite(meters) && (props.canvasBoundary ? meters !== current.value : meters !== inputValue)) {
         emit("update-component-properties", {id: props.selectedItem.id, [modelDimension(dimension)]: meters});
     }
+    event.target.value = String(current.value);
 };
 
 const handleShadowColorChange = (event) => {
@@ -901,7 +1011,19 @@ const handleShadowColorChange = (event) => {
 .assembly-table tr:focus-visible { outline: 1px solid #2563eb; outline-offset: -1px; }
 .assembly-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .assembly-actions button { flex: 1 0 auto; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 4px; background: white; font: inherit; font-size: 12px; cursor: pointer; }
+.assembly-actions button:hover{ background-color: #e8eaf0 }
 .assembly-actions button:disabled { opacity: .5; cursor: default; }
+.shape-properties-table { width: 100%; border-collapse: collapse; border: 1px solid #dbe2eb; font-size: 13px; }
+.shape-properties-table th, .shape-properties-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid #e5e7eb;
+    text-align: center;
+}
+.shape-properties-table thead { background: #f3f6fa; color: #1f2937; }
+.shape-properties-table tbody th { font-weight: normal; color: #4b5563; white-space: nowrap; }
+.shape-properties-table td { font-variant-numeric: tabular-nums; }
+.wall-thickness-row { margin-bottom: 4px; }
+.wall-thickness-row select { flex: 1; min-width: 0; }
 .connection-table-title { margin-top: 8px; }
 .connection-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 12px; color: #1f2937; }
 .connection-table th, .connection-table td { padding: 6px 4px; text-align: center; border: 1px solid #dbe2eb; overflow-wrap: anywhere; }

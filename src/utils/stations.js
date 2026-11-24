@@ -1,3 +1,7 @@
+import {DEFAULT_TRIANGLE_SIZE, TRIANGULAR_OBSTACLE_TYPE} from './triangleObstacle.js';
+import {CIRCULAR_OBSTACLE_TYPE, getCircleRadius} from './componentAppearance.js';
+import {getWallOuterBounds, getWallSettings, RECTANGULAR_WALL_TYPE} from './rectangularWall.js';
+
 // 站点的 x/y 始终表示中心，尺寸以米保存。
 export const STATION_TYPES = [
   { value: "parking", label: "停靠站点", color: "#3b82f6", fill: "#dbeafe" },
@@ -24,6 +28,17 @@ export const getNextStationIndex = (components, stationType, excludedId) => {
 
 // 同时兼容原来没有尺寸的站点。
 export const getComponentBounds = (component) => {
+  if (component.type === RECTANGULAR_WALL_TYPE) {
+    const {width, height} = getWallSettings(component);
+    return {x: component.x, y: component.y, width, height};
+  }
+  if (component.type === CIRCULAR_OBSTACLE_TYPE) {
+    const diameter = 2 * getCircleRadius(component);
+    return {x: component.x, y: component.y, width: diameter, height: diameter};
+  }
+  if (component.type === TRIANGULAR_OBSTACLE_TYPE && !component.triangleVertices) {
+    return {x: component.x, y: component.y, ...DEFAULT_TRIANGLE_SIZE};
+  }
   const isStation = component.type === "node";
   const width = isStation ? (component.width > 0 ? component.width : DEFAULT_STATION_SIZE.width) : (component.width ?? 0);
   const height = isStation ? (component.height > 0 ? component.height : DEFAULT_STATION_SIZE.height) : (component.height ?? 0);
@@ -37,7 +52,8 @@ export const getComponentBounds = (component) => {
 
 export const getComponentCenter = (component) => {
   if (component.type === "node") return { x: component.x, y: component.y };
-  return { x: component.x + (component.width ?? 0) / 2, y: component.y + (component.height ?? 0) / 2 };
+  const {x, y, width, height} = getComponentBounds(component);
+  return {x: x + width / 2, y: y + height / 2};
 };
 
 // 一个单位表示顺时针转 90°。模型坐标和本地尺寸仍按未旋转矩形存储。
@@ -47,8 +63,10 @@ export const getComponentQuarterTurns = (component) => {
 };
 
 export const getComponentFootprint = (component) => {
+  if (component.type === RECTANGULAR_WALL_TYPE) return getWallOuterBounds(component);
   const bounds = getComponentBounds(component);
-  if (getComponentQuarterTurns(component) % 2 === 0) return bounds;
+  if (component.type === TRIANGULAR_OBSTACLE_TYPE || component.type === CIRCULAR_OBSTACLE_TYPE ||
+      getComponentQuarterTurns(component) % 2 === 0) return bounds;
   const {x, y} = getComponentCenter(component);
   return {
     x: x - bounds.height / 2,

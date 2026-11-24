@@ -56,14 +56,17 @@ function matchesBinding(event, binding) {
 
 // 窗口内统一分发快捷键，配置只记录按键，命令由应用提供。
 export function installShortcuts(target, bindings, commands) {
-    const entries = Object.entries(bindings);
-    const eventTypes = new Set(entries.flatMap(([, binding]) =>
+    const entries = Object.entries(bindings).map(([id, binding]) => {
+        const command = commands[id];
+        return {binding, run: typeof command === 'function' ? command : command?.run, when: command?.when};
+    });
+    const eventTypes = new Set(entries.flatMap(({binding}) =>
         binding.button === undefined ? ['keydown'] : ['mousedown', 'mouseup', 'auxclick']));
     const handleShortcut = event => {
         if (event.defaultPrevented) return;
-        const match = entries.find(([, binding]) => matchesBinding(event, binding));
+        const match = entries.find(({binding, when}) => matchesBinding(event, binding) && (!when || when(event)));
         if (!match) return;
-        const [commandId, binding] = match;
+        const {binding, run} = match;
         const mouse = binding.button !== undefined;
         // 阻止已绑定的侧键触发页面导航，抬起时不重复执行命令。
         if (mouse) {
@@ -72,7 +75,7 @@ export function installShortcuts(target, bindings, commands) {
         }
         if (event.isComposing || isEditing(event.target) || isEditing(target.document?.activeElement)) return;
         event.preventDefault();
-        if (!event.repeat) commands[commandId]?.(event);
+        if (!event.repeat) run?.(event);
     };
     const listenerOptions = {capture: true};
     for (const type of eventTypes) target.addEventListener(type, handleShortcut, listenerOptions);

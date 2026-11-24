@@ -19,12 +19,12 @@
 
         <!-- 日志内容区域 -->
         <div ref="contentRef" class="content" @scroll="handleScroll">
-            <div v-show="activeTab === 'log'" class="log-list">
+            <div v-show="activeTab === 'log'" ref="logList" class="log-list">
                 <div v-for="(log, index) in logs" :key="index" class="log-item">
                     {{ log }}
                 </div>
             </div>
-            <div v-show="activeTab === 'console'" class="console-content">
+            <div v-show="activeTab === 'console'" ref="consoleContent" class="console-content">
             </div>
         </div>
 
@@ -55,6 +55,20 @@ const props = defineProps({
 })
 
 const activeTab = ref('log')
+const logList = ref(null)
+const consoleContent = ref(null)
+
+function selectVisibleContent() {
+    const content = activeTab.value === 'log' ? logList.value : consoleContent.value
+    const selection = content?.ownerDocument.getSelection()
+    if (!selection) return
+    const range = content.ownerDocument.createRange()
+    range.selectNodeContents(content)
+    selection.removeAllRanges()
+    selection.addRange(range)
+}
+
+defineExpose({selectVisibleContent})
 
 // 日志滚动容器
 const contentRef = ref(null)
@@ -163,6 +177,7 @@ watch(activeTab, (tab) => {
     flex: 1;
     overflow-y: auto;
     padding: 8px 16px;
+    user-select: text;
 }
 
 .log-list {

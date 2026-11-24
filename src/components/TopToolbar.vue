@@ -2,7 +2,7 @@
 <template>
     <div class="top-toolbar">
         <div v-for="item in topToolBarMenus" :key="item.id">
-            <button class="btn" @click="handleClickControl(item)">
+            <button class="btn" @click="item.id === 'undo' && emit('undo')">
                 <img class="btn-img" :src="item.icon" :alt="item.name" />
                 <span class="btn-text">{{ item.name }}</span>
             </button>
@@ -11,13 +11,9 @@
 </template>
 
 <script setup>
-import {ref} from "vue";
 import {topToolBarMenus} from "@/config/topToolBarMenuData";
 
-//控件点击事件
-const handleClickControl = (item) => {
-
-};
+const emit = defineEmits(['undo']);
 
 </script>
 
