@@ -1,4 +1,4 @@
-import {INPUT_PROPERTY_DEFAULTS, getInputType, getInputRuleCategory, getInputRuleValidationMessage, sampleInputRule, getDefaultWorkpieceDimensions} from './inputRules.js';
+import {INPUT_PROPERTY_DEFAULTS, INPUT_RULE_DEFAULT_DIMENSIONS, getInputType, getInputRuleCategory, getInputRuleValidationMessage, sampleInputRule, getDefaultWorkpieceDimensions} from './inputRules.js';
 import {DEFAULT_COMPONENT_SIZES} from './componentAppearance.js';
 import {getComponentLabel} from './componentLabel.js';
 import {getConnectionGeometry, getPointOnConnection, DEFAULT_WORKPIECE_SPEED} from './connectionLine.js';
@@ -261,9 +261,8 @@ export function createInputSimulation(random = Math.random) {
             const moving = route && !reservesBuffer;
             while (due <= timeMilliseconds && due < closes && state.count < maximum) {
                 const rule = sampleInputRule(rules, random);
-                const defaults = getDefaultWorkpieceDimensions(input);
-                const actualLength = (rule.length ?? defaults.length) / 1000;
-                const actualWidth = (rule.width ?? defaults.width) / 1000;
+                const actualLength = (rule.length ?? INPUT_RULE_DEFAULT_DIMENSIONS.length) / 1000;
+                const actualWidth = (rule.width ?? INPUT_RULE_DEFAULT_DIMENSIONS.width) / 1000;
                 const width = input.workpieceDisplayMode === 'actual' ? actualLength : recommendedWidth;
                 const height = input.workpieceDisplayMode === 'actual' ? actualWidth : recommendedHeight;
                 const part = {

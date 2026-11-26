@@ -1,4 +1,4 @@
-import {RECTANGULAR_OBSTACLE_TYPE, RESIZABLE_COMPONENT_TYPES} from './componentAppearance.js';
+import {RESIZABLE_COMPONENT_TYPES, RESIZABLE_COMPONENT_TYPES_WITHOUT_PORTS} from './componentAppearance.js';
 import {getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns} from './stations.js';
 
 const PORTS = [
@@ -7,8 +7,9 @@ const PORTS = [
 ];
 
 export function getComponentPorts(component) {
-    if (!RESIZABLE_COMPONENT_TYPES.has(component?.type) || component.type === RECTANGULAR_OBSTACLE_TYPE) return [];
-    return PORTS.filter(port => port.excludedType !== component.type);
+    const type = component?.type;
+    if (!RESIZABLE_COMPONENT_TYPES.has(type) || RESIZABLE_COMPONENT_TYPES_WITHOUT_PORTS.has(type)) return [];
+    return PORTS.filter(port => port.excludedType !== type);
 }
 
 function rotateOffset({x, y}, turns) {

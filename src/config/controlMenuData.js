@@ -21,9 +21,10 @@ export const menuControls = {
         {id: 9, name: "连接线", icon: "/src/assets/icons/connectionLine.svg", type: "connectionLine"}
     ],
     logistics: [
-        {id: 1, name: "AGV路径", icon: "/src/assets/icons/AGVpath.svg", type: "AGVpath"},
-        {id: 2, name: "站点", icon: "/src/assets/icons/node.svg", type: "node"},
-        {id: 3, name: "立体仓库", icon: "/src/assets/icons/warehouse.svg", type: "warehouse"},
+        {id: 1, name: "AGV配置", icon: "/src/assets/icons/AGVconfiguration.svg", type: "AGVconfiguration"},
+        {id: 2, name: "AGV路径", icon: "/src/assets/icons/AGVpath.svg", type: "AGVpath"},
+        {id: 3, name: "站点", icon: "/src/assets/icons/node.svg", type: "node"},
+        {id: 4, name: "立体仓库", icon: "/src/assets/icons/warehouse.svg", type: "warehouse"},
 
 
     ],

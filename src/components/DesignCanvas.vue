@@ -69,6 +69,7 @@ import {
     getComponentQuarterTurns
 } from "../utils/stations.js";
 import {getComponentPorts, getComponentPortPosition} from "../utils/componentPorts.js";
+import {AGV_CONFIGURATION_TYPE, DUPLICATE_AGV_CONFIGURATION_MESSAGE, findAgvConfiguration, getAgvParkingGrid} from "../utils/agvConfiguration.js";
 import {getConnectionGeometry} from "../utils/connectionLine.js";
 import {clampCanvasOffset, clampCanvasPoint, encloseCanvasBounds, fitsCanvasBounds, getCanvasItemBounds, getCanvasMoveBounds} from "../utils/canvasBoundary.js";
 import {footprintsOverlap, getCollisionFootprint, resolveComponentDrag} from "../utils/componentCollision.js";
@@ -88,8 +89,10 @@ import {
     CIRCULAR_OBSTACLE_TYPE,
     OBSTACLE_COMPONENT_TYPES,
     RESIZABLE_COMPONENT_TYPES,
+    PRODUCTION_COMPONENT_TYPES,
     DEFAULT_COMPONENT_SHADOW_COLORS,
-    DEFAULT_COMPONENT_SIZES
+    DEFAULT_COMPONENT_SIZES,
+    getDefaultShadowColor
 } from "../utils/componentAppearance.js";
 import {getLocalTriangleVertices, getTriangleVertices, TRIANGULAR_OBSTACLE_TYPE} from "../utils/triangleObstacle.js";
 import {getWallGeometry, RECTANGULAR_WALL_TYPE} from "../utils/rectangularWall.js";
@@ -140,6 +143,7 @@ const emit = defineEmits([
     "resize-obstacle-edge",
     "update-component-properties",
     "rename-component",
+    "open-component-properties",
 ]);
 
 // 控件唯一 id 计数器（序号 index 会在删除后被复用，因此需要独立的稳定 id）
@@ -335,6 +339,7 @@ const shouldShowCustomCursor = computed(() => {
 watch(
     () => props.activeControl,
     (newControl, oldControl) => {
+        showCursor.value = false;
         alignmentGuides.value = [];
         hoveredObstacleAxis.value = null;
         const isLineMode = newControl?.type === "connectionLine";
@@ -349,11 +354,7 @@ watch(
         if (!isLineMode) clearConnectionDraft();
 
         // 重置 AGV 路径状态
-        if (!isAGVPathMode) {
-            agvStartNode.value = null;
-            agvPathPoints.value = [];
-            tempAGVPoint.value = null;
-        }
+        if (!isAGVPathMode) clearAGVPathDraft();
 
         // 刚切到连接线或 AGV 路径模式：清掉上一步残留的选中态
         if ((isLineMode && !wasLineMode) || (isAGVPathMode && !wasAGVPathMode)) {
@@ -865,8 +866,7 @@ const drawSingleComponent = (ctx, component) => {
     }
 
     if (RESIZABLE_COMPONENT_TYPES.has(component.type)) {
-        const shadowColor = component.shadowColor || DEFAULT_COMPONENT_SHADOW_COLORS[component.type];
-        ctx.fillStyle = shadowColor;
+        ctx.fillStyle = component.shadowColor || getDefaultShadowColor(component.type);
         ctx.fillRect(px, py, pw, ph);
         ctx.strokeStyle = isComponentSelected(component.id) ? "#2566fd" : "rgba(100, 116, 139, 0.45)";
         ctx.lineWidth = isComponentSelected(component.id) ? 2 : 1;
@@ -954,6 +954,90 @@ const drawPlacedComponents = (ctx) => {
     ctx.restore();
 };
 
+const agvParkingRows = computed(() => {
+    const rows = findAgvConfiguration(props.placedComponents)?.agvRows ?? [];
+    return new Map(rows.map(row => [row.stationId, row]));
+});
+
+function drawAgvVehicle(ctx, x, y, length, width) {
+    const wheelLength = length * 0.16;
+    const wheelWidth = width * 0.1;
+    const plateWidth = width * 0.8;
+    ctx.fillStyle = '#374151';
+    for (const axle of [-0.32, 0.32]) {
+        const wheelX = x + length * axle - wheelLength / 2;
+        ctx.fillRect(wheelX, y - width / 2, wheelLength, wheelWidth);
+        ctx.fillRect(wheelX, y + plateWidth / 2, wheelLength, wheelWidth);
+    }
+
+    const left = x - length / 2;
+    const top = y - plateWidth / 2;
+    const rim = Math.min(length, width) * 0.065;
+    // 车头朝本地 +X，稍加厚前侧边框并在边框上画两个标记。
+    const frontRim = rim * 1.5;
+    ctx.fillStyle = '#d97706';
+    ctx.fillRect(left, top, length, plateWidth);
+    ctx.fillStyle = '#fde68a';
+    ctx.fillRect(left + rim, top + rim, length - rim - frontRim, plateWidth - 2 * rim);
+
+    const markLength = frontRim * 0.5;
+    const markWidth = plateWidth * 0.12;
+    const markX = left + length - (frontRim + markLength) / 2;
+    ctx.fillStyle = '#991b1b';
+    ctx.fillRect(markX, y - plateWidth * 0.25 - markWidth / 2, markLength, markWidth);
+    ctx.fillRect(markX, y + plateWidth * 0.25 - markWidth / 2, markLength, markWidth);
+}
+
+// 按单元格裁掉视口外的车位，避免遍历大型站点的所有车辆。
+function visibleAgvSlots(center, halfView, span, slotSize, count) {
+    return [
+        Math.max(0, Math.floor((center - halfView + span / 2) / slotSize)),
+        Math.min(count - 1, Math.floor((center + halfView + span / 2) / slotSize)),
+    ];
+}
+
+function drawParkedAgvs(ctx, station, row) {
+    const grid = getAgvParkingGrid(station, row);
+    if (!grid || !Number.isSafeInteger(row.count) || row.count < 1) return;
+
+    const length = toPx(grid.vehicleLength), width = toPx(grid.vehicleWidth);
+    if (Math.min(length, width) < 1) return;
+    const stationLength = toPx(grid.width), stationWidth = toPx(grid.height);
+    const count = Math.min(grid.capacity, row.count);
+    // 优先接近方阵；站点较窄或较浅时按可用行列数调整。
+    const minimumColumns = Math.ceil(count / grid.rows);
+    const columns = Math.max(minimumColumns, Math.min(grid.columns, Math.ceil(Math.sqrt(count))));
+    const rows = Math.ceil(count / columns);
+    const slotWidth = stationWidth / rows;
+
+    const x = toPx(station.x), y = toScreenY(station.y);
+    const turns = getComponentQuarterTurns(station);
+    const angle = turns * Math.PI / 2;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const dx = canvasWidth.value / 2 - (x + viewOffsetX.value);
+    const dy = canvasHeight.value / 2 - (y + viewOffsetY.value);
+    const localX = dx * cos + dy * sin;
+    const localY = -dx * sin + dy * cos;
+    const halfX = (turns % 2 ? canvasHeight.value : canvasWidth.value) / 2;
+    const halfY = (turns % 2 ? canvasWidth.value : canvasHeight.value) / 2;
+    const [firstRow, lastRow] = visibleAgvSlots(localY, halfY, stationWidth, slotWidth, rows);
+    if (firstRow > lastRow) return;
+
+    ctx.save();
+    ctx.translate(x, y);
+    if (turns) ctx.rotate(angle);
+    for (let i = firstRow; i <= lastRow; i++) {
+        const vehiclesInRow = Math.min(columns, count - i * columns);
+        const slotLength = stationLength / vehiclesInRow;
+        const [first, last] = visibleAgvSlots(localX, halfX, stationLength, slotLength, vehiclesInRow);
+        const localVehicleY = -stationWidth / 2 + (i + 0.5) * slotWidth;
+        for (let j = first; j <= last; j++) {
+            drawAgvVehicle(ctx, -stationLength / 2 + (j + 0.5) * slotLength, localVehicleY, length, width);
+        }
+    }
+    ctx.restore();
+}
+
 // 站点中心坐标保持不变，矩形宽高随视图比例缩放。
 const drawNodeComponent = (ctx, component) => {
     const bounds = getComponentFootprint(component);
@@ -964,6 +1048,8 @@ const drawNodeComponent = (ctx, component) => {
     const height = toPx(bounds.height);
     ctx.fillStyle = style.fill;
     ctx.fillRect(x, y, width, height);
+    const parkingRow = agvParkingRows.value.get(component.id);
+    if (parkingRow) drawParkedAgvs(ctx, component, parkingRow);
     ctx.strokeStyle = style.color;
     ctx.lineWidth = 1.5;
     ctx.strokeRect(x, y, width, height);
@@ -1734,9 +1820,7 @@ const createAGVPath = (endNode) => {
     );
 
     // 重置状态
-    agvStartNode.value = null;
-    agvPathPoints.value = [];
-    tempAGVPoint.value = null;
+    clearAGVPathDraft();
 
     // 通知父组件放置完成，重置为"选择"状态
     emit("placement-done");
@@ -1744,15 +1828,19 @@ const createAGVPath = (endNode) => {
     drawGrid();
 };
 
-// 双击名称标签进入改名。放置控件/连接线模式下不响应，避免与放置操作打架
+// 名称标签用于改名，生产组件本体用于打开属性窗口。
 const handleDoubleClick = (e) => {
-    if (connectionLineMode.value || shouldShowCustomCursor.value) return;
+    if (props.activeControl && props.activeControl.type !== "select") return;
 
     const pos = getCanvasMousePosition(e);
-    const hit = hitTestLabel(pos.x, pos.y);
-    if (!hit) return;
+    const label = hitTestLabel(pos.x, pos.y);
+    if (label) {
+        startLabelEdit(label);
+        return;
+    }
 
-    startLabelEdit(hit);
+    const component = hitTestComponent(pos.x, pos.y);
+    if (PRODUCTION_COMPONENT_TYPES.has(component?.type)) emit("open-component-properties", component.id);
 };
 
 // 中键按住拖动平移，左键始终用于选择和编辑。
@@ -1902,6 +1990,12 @@ function clearConnectionDraft() {
     tempLineEnd.value = null;
 }
 
+function clearAGVPathDraft() {
+    agvStartNode.value = null;
+    agvPathPoints.value = [];
+    tempAGVPoint.value = null;
+}
+
 function undoDraftPoint() {
     if (firstPort.value) {
         if (connectionWaypoints.value.length) {
@@ -1928,8 +2022,15 @@ const cancelConnectionDraft = () => {
     drawGrid();
 };
 
+const cancelAGVPathDraft = () => {
+    if (!agvStartNode.value) return;
+    clearAGVPathDraft();
+    emit("add-log", "AGV 路径：已取消当前绘制");
+    drawGrid();
+};
+
 const handleCanvasContextMenu = (event) => {
-    if (connectionLineMode.value) event.preventDefault();
+    if (connectionLineMode.value || agvPathMode.value) event.preventDefault();
 };
 
 const findConnectionPort = (position) => {
@@ -1938,7 +2039,7 @@ const findConnectionPort = (position) => {
     let nearest = null;
     let closest = toMeters(CONNECTION_PORT_GRAB);
     for (const component of [...props.placedComponents].reverse()) {
-        if (component.type === 'node' || component.id === first?.component.id) continue;
+        if (component.id === first?.component.id) continue;
         for (const key of keys) {
             const point = getComponentPortPosition(component, key);
             if (!point) continue;
@@ -2005,9 +2106,10 @@ const placeConnectionPoint = (position) => {
 // 鼠标事件处理
 const handleMouseDown = async (e) => {
     clearWorkpieceHover();
-    if (e.button === 2 && connectionLineMode.value) {
+    if (e.button === 2 && (connectionLineMode.value || agvPathMode.value)) {
         e.preventDefault();
-        cancelConnectionDraft();
+        if (agvPathMode.value) cancelAGVPathDraft();
+        else cancelConnectionDraft();
         return;
     }
     if (e.button !== 0 && e.button !== 1) return;
@@ -2072,9 +2174,7 @@ const handleMouseDown = async (e) => {
             // 至少需要 2 个点（起点站点 + 终点站点）才能形成路径
             if (agvPathPoints.value.length < 2) {
                 emit("add-log", "AGV 路径：至少需要起点和终点两个站点");
-                agvStartNode.value = null;
-                agvPathPoints.value = [];
-                tempAGVPoint.value = null;
+                clearAGVPathDraft();
                 drawGrid();
                 return;
             }
@@ -2196,6 +2296,14 @@ const handleMouseDown = async (e) => {
         return;
     }
 
+    const control = props.activeControl;
+    const {type} = control;
+    const isDuplicateAgvConfiguration = () => type === AGV_CONFIGURATION_TYPE && findAgvConfiguration(props.placedComponents);
+    if (isDuplicateAgvConfiguration()) {
+        emit("add-log", DUPLICATE_AGV_CONFIGURATION_MESSAGE);
+        return;
+    }
+
     // 使用点击时的世界坐标，平移或恢复全局视图后无需先移动鼠标。
     const position = getCanvasMousePosition(e);
     const anchor = getPlacementAnchor(position, e);
@@ -2250,7 +2358,6 @@ const handleMouseDown = async (e) => {
     }
 
     // 其他控件：由中心反推左下角（默认真实尺寸，米）
-    const type = props.activeControl.type;
     const defaultSize = DEFAULT_COMPONENT_SIZES[type] ?? DEFAULT_STATION_SIZE;
     const componentX = anchorX - defaultSize.width / 2;
     const componentY = anchorY - defaultSize.height / 2;
@@ -2260,7 +2367,14 @@ const handleMouseDown = async (e) => {
 
     // 预加载图片
     const triangleVertices = type === TRIANGULAR_OBSTACLE_TYPE ? getLocalTriangleVertices({}) : undefined;
-    if (!OBSTACLE_COMPONENT_TYPES.has(type)) await preloadImage(props.activeControl.icon);
+    if (!OBSTACLE_COMPONENT_TYPES.has(type)) {
+        await preloadImage(control.icon);
+        if (props.activeControl !== control) return;
+        if (isDuplicateAgvConfiguration()) {
+            emit("add-log", DUPLICATE_AGV_CONFIGURATION_MESSAGE);
+            return;
+        }
+    }
     const bounds = getCollisionFootprint({...defaultSize, type, x: finalX, y: finalY, triangleVertices});
     if (!fitsCanvasBounds(bounds, props.canvasBoundary) || props.placedComponents.some(item => {
         const obstacle = getCollisionFootprint(item);
@@ -2268,7 +2382,7 @@ const handleMouseDown = async (e) => {
     })) return;
 
     // 计算同类型控件的序号（填补被删除控件留下的空缺）
-    const index = getNextIndexForType(props.activeControl.type);
+    const index = getNextIndexForType(type);
 
     // 生成稳定唯一 id（序号 index 会被复用，不能当作 id）
     const id = createComponentId();
@@ -2276,16 +2390,16 @@ const handleMouseDown = async (e) => {
     // 通知父组件新增控件（父组件维护 placedComponents 单一数据源，模型树共享）
     const component = {
         id,
-        type: props.activeControl.type,
-        name: props.activeControl.name,
-        icon: props.activeControl.icon,
-        tabId: props.activeControl.tabId,
+        type,
+        name: control.name,
+        icon: control.icon,
+        tabId: control.tabId,
         index,
         x: finalX,
         y: finalY,
         width: defaultSize.width,
         height: defaultSize.height,
-        shadowColor: DEFAULT_COMPONENT_SHADOW_COLORS[props.activeControl.type],
+        shadowColor: DEFAULT_COMPONENT_SHADOW_COLORS[type],
         ...(triangleVertices ? {triangleVertices} : {}),
     };
     if (type === RECTANGULAR_WALL_TYPE && hasWallRouteCollision(props.placedComponents, [component])) {
@@ -2297,7 +2411,7 @@ const handleMouseDown = async (e) => {
     // 输出日志：新建对象，类型：<type>，编号：<name><序号>
     emit(
         "add-log",
-        `新建对象，类型：${props.activeControl.type}，编号：${props.activeControl.name}${index}`,
+        `新建对象，类型：${type}，编号：${control.name}${index}`,
     );
 
     // 通知父组件放置完成，重置为"选择"状态
@@ -2729,34 +2843,18 @@ watch(
     {deep: true},
 );
 
-// Esc 取消连接线绘制（已点了起点时撤回起点，否则退出连接线模式）
-// 或取消 AGV 路径绘制
+// 先取消框选或路径草稿，否则退出当前放置工具。
 const handleCanvasKeyDown = (e) => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
     if (e.target?.closest?.("input, textarea, [contenteditable='true']")) return;
-    if (e.key !== "Escape") return;
     if (selectionBox.value) {
         cancelSelectionBox();
         return;
     }
 
-    if (connectionLineMode.value) {
-        if (firstPort.value) cancelConnectionDraft();
-        else emit("placement-done");
-    }
-
-    if (agvPathMode.value) {
-        if (agvStartNode.value) {
-            // 已选择起点站点，清空当前路径
-            agvStartNode.value = null;
-            agvPathPoints.value = [];
-            tempAGVPoint.value = null;
-            emit("add-log", "AGV 路径：已取消当前绘制");
-            drawGrid();
-        } else {
-            // 未选择起点时直接退出 AGV 路径模式，回到"选择"
-            emit("placement-done");
-        }
-    }
+    if (connectionLineMode.value && firstPort.value) cancelConnectionDraft();
+    else if (agvPathMode.value && agvStartNode.value) cancelAGVPathDraft();
+    else if (props.activeControl && props.activeControl.type !== "select") emit("placement-done");
 };
 
 const handleWindowBlur = () => {

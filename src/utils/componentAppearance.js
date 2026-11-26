@@ -15,9 +15,15 @@ const DEFAULT_CIRCLE_RADIUS = 1.5;
 export const getCircleRadius = (component) => Number.isFinite(component.width) && component.width > 0
   ? component.width / 2 : DEFAULT_CIRCLE_RADIUS;
 
-// 有实际矩形占地、可编辑宽高的控件类型。
-export const RESIZABLE_COMPONENT_TYPES = new Set([
+// 可编辑宽高，但没有上下料点的矩形控件。
+export const RESIZABLE_COMPONENT_TYPES_WITHOUT_PORTS = new Set([
   "node",
+  "AGVconfiguration",
+  "createScript",
+  RECTANGULAR_OBSTACLE_TYPE,
+]);
+
+export const PRODUCTION_COMPONENT_TYPES = new Set([
   "systemInput",
   "systemOutput",
   "workstation",
@@ -25,7 +31,12 @@ export const RESIZABLE_COMPONENT_TYPES = new Set([
   "assemblyWorkstation",
   "disassemblyWorkstation",
   "buffer",
-  RECTANGULAR_OBSTACLE_TYPE,
+]);
+
+// 有实际矩形占地、可编辑宽高的控件类型。
+export const RESIZABLE_COMPONENT_TYPES = new Set([
+  ...PRODUCTION_COMPONENT_TYPES,
+  ...RESIZABLE_COMPONENT_TYPES_WITHOUT_PORTS,
 ]);
 
 export const DEFAULT_COMPONENT_SHADOW_COLORS = {

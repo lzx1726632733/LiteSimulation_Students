@@ -17,13 +17,8 @@ export const getPathCorner = (nodes, i) => {
   const turn = Math.atan2(u.x * v.y - u.y * v.x, u.x * v.x + u.y * v.y);
   if (Math.abs(turn) < EPS || Math.PI - Math.abs(turn) < EPS) return null;
   const factor = Math.tan(Math.abs(turn) / 2);
-  // 相邻圆弧各占共享线段的一半；首尾线段可以全部用于圆弧。
-  const available = Math.min(before / (i > 1 ? 2 : 1), after / (i < nodes.length - 2 ? 2 : 1));
-  return { u, v, turn, factor, maxRadius: available / factor };
+  return {u, v, turn, factor};
 };
-
-export const getCornerMaxRadius = (nodes, cornerIndex) =>
-  getPathCorner(nodes || [], cornerIndex + 1)?.maxRadius || 0;
 
 export const buildPathArc = (point, {u, v, turn, factor}, radius) => {
   const distance = radius * factor;
@@ -36,29 +31,58 @@ export const buildPathArc = (point, {u, v, turn, factor}, radius) => {
     sweep: turn, length: Math.abs(turn) * radius};
 };
 
-export const buildPathGeometry = (path) => {
-  const nodes = path.nodes || [];
-  if (nodes.length < 2 || nodes.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return [];
-  const segments = [];
-  let cursor = nodes[0];
-  const lineTo = (end) => {
-    const length = Math.hypot(end.x - cursor.x, end.y - cursor.y);
-    if (length > EPS) segments.push({ type: "line", start: cursor, end, length });
-    cursor = end;
-  };
-  for (let i = 1; i < nodes.length - 1; i++) {
-    const corner = getPathCorner(nodes, i);
-    const requested = path.cornerRadii?.[i - 1];
-    const radius = corner && Number.isFinite(requested) ? Math.max(0, Math.min(requested, corner.maxRadius)) : 0;
-    if (radius < EPS) { lineTo(nodes[i]); continue; }
-    const arc = buildPathArc(nodes[i], corner, radius);
-    lineTo(arc.start);
-    segments.push(arc);
-    cursor = arc.end;
-  }
-  lineTo(nodes[nodes.length - 1]);
-  return segments;
+function connectionAngle(start, end, length, savedAngle) {
+    const angle = Math.atan2(end.y - start.y, end.x - start.x) * 180 / Math.PI;
+    if (Number.isFinite(savedAngle) && savedAngle >= -360 && savedAngle <= 360) {
+        const difference = ((savedAngle - angle) % 360 + 360) % 360;
+        if (length <= EPS || Math.min(difference, 360 - difference) < 1e-8) return savedAngle || 0;
+    }
+    return angle || 0;
+}
+
+export const getPathParameters = (nodes, path) => {
+    if (!nodes || nodes.length < 2 || nodes.some(point => !Number.isFinite(point?.x) || !Number.isFinite(point?.y))) return null;
+    const lengths = nodes.slice(1).map((point, i) => Math.hypot(point.x - nodes[i].x, point.y - nodes[i].y));
+    const corners = nodes.slice(1, -1).map((point, i) => ({point, ...getPathCorner(nodes, i + 1), setback: 0, radius: 0}));
+    const radiusLimit = i => {
+        const {factor} = corners[i];
+        if (!factor) return 0;
+        const before = lengths[i] - (corners[i - 1]?.setback ?? 0);
+        const after = lengths[i + 1] - (corners[i + 1]?.setback ?? 0);
+        return Math.max(0, Math.min(before, after) / factor);
+    };
+    // 相邻圆角共用一段直线，按路径顺序分配切点距离，兼容端口移动后的几何变化。
+    for (const [i, corner] of corners.entries()) {
+        const requested = path.cornerRadii?.[i];
+        if (!Number.isFinite(requested) || requested <= 0 || !corner.factor) continue;
+        corner.radius = Math.min(requested, radiusLimit(i));
+        corner.setback = corner.radius * corner.factor;
+        if (corner.radius > 0) corner.arc = buildPathArc(corner.point, corner, corner.radius);
+    }
+
+    const rows = [];
+    const segments = [];
+    for (const [i, rawLength] of lengths.entries()) {
+        const previous = corners[i - 1], next = corners[i];
+        const angle = connectionAngle(nodes[i], nodes[i + 1], rawLength,
+            path.segmentAngles?.[i] ?? (lengths.length === 1 ? path.angle : undefined));
+        const length = Math.max(0, rawLength - (previous?.setback ?? 0) - (next?.setback ?? 0));
+        const start = previous?.arc?.end ?? nodes[i];
+        const end = next?.arc?.start ?? nodes[i + 1];
+        const segment = {type: 'line', start, end, length, angle};
+        segments.push(segment);
+        rows.push({type: 'Line', index: i, length, angle, rawLength});
+        if (next) {
+            if (next.arc) segments.push({...next.arc, cornerIndex: i});
+            rows.push({type: next.arc ? 'Arc' : 'Point', index: i, point: next.point, radius: next.radius, maxRadius: radiusLimit(i)});
+        }
+    }
+    return {nodes, rows, segments, cornerRadii: corners.map(corner => corner.radius),
+        length: segments.reduce((sum, segment) => sum + segment.length, 0), angle: rows[0].angle};
 };
+
+export const buildPathGeometry = path =>
+  getPathParameters(path.nodes, path)?.segments.filter(segment => segment.length > EPS) ?? [];
 
 // 返回中心线上的位置及前进切向量，供直线和圆弧共用方向箭头。
 export const pointOnPathSegment = (segment, fraction) => {

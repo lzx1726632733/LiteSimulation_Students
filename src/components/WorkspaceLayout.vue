@@ -94,6 +94,7 @@
                     @resize-obstacle-edge="handleResizeObstacleEdge"
                     @update-component-properties="handleUpdateComponentProperties"
                     @rename-component="handleRenameComponent"
+                    @open-component-properties="openComponentProperties"
                 />
             </div>
 
@@ -133,12 +134,16 @@
             />
         </div>
     </div>
+    <ComponentPropertiesDialog v-if="componentPropertiesItem" :key="componentPropertiesItem.id" :item="componentPropertiesItem"
+                               @close="componentPropertiesId = null" @open-dialog="openDialog"
+                               @update-component-properties="handleUpdateComponentProperties"/>
     <WallExitDialog v-if="activeDialog?.dialogType === 'wall-exits' && dialogItem"
                     :key="activeDialog.key" :wall="dialogItem" :validate="validateWallExits"
                     @close="activeDialog = null" @save="saveDialog"/>
     <Dialog v-else-if="activeDialog && (dialogItem || activeDialog.dialogType === 'finite-canvas')"
             :key="activeDialog.key"
             :item="dialogItem" :dialog-type="activeDialog.dialogType"
+            :placed-components="placedComponents"
             :assembly-recipe="activeDialog.dialogType === 'assembly-recipe' ? activeDialog.recipe : null"
             :assembly-mode="activeDialog.mode"
             :assembly-packing-type="activeDialog.packingType"
@@ -156,24 +161,26 @@ import {ref, shallowRef, computed, watch, onMounted, onUnmounted, onBeforeUnmoun
 import ResourceSidebar from './ResourceSidebar.vue'
 import DesignCanvas from './DesignCanvas.vue'
 import PropertyPanel from './PropertyPanel.vue'
+import ComponentPropertiesDialog from './ComponentPropertiesDialog.vue'
 import Dialog from './Dialog.vue'
 import WallExitDialog from './WallExitDialog.vue'
 import ConsolePanel from './ConsolePanel.vue'
 import {getComponentLabel} from '../utils/componentLabel.js'
 import {STATION_TYPES, getStationType, getNextStationIndex, getComponentCenter, getComponentFootprint, getComponentQuarterTurns} from '../utils/stations.js'
-import {CIRCULAR_OBSTACLE_TYPE, getCircleRadius, MIN_CIRCLE_RADIUS, RECTANGULAR_OBSTACLE_TYPE, RESIZABLE_COMPONENT_TYPES} from '../utils/componentAppearance.js'
-import {getCornerMaxRadius} from '../utils/agvPath.js'
+import {CIRCULAR_OBSTACLE_TYPE, getCircleRadius, MIN_CIRCLE_RADIUS, RECTANGULAR_OBSTACLE_TYPE, RESIZABLE_COMPONENT_TYPES, PRODUCTION_COMPONENT_TYPES} from '../utils/componentAppearance.js'
+import {getPathParameters} from '../utils/agvPath.js'
+import {AGV_CONFIGURATION_TYPE, DUPLICATE_AGV_CONFIGURATION_MESSAGE, findAgvConfiguration, getAgvParkingCapacity, getAgvRowsError, isValidAgvRange} from '../utils/agvConfiguration.js'
 import {menuControls} from "@/config/controlMenuData";
 import {simulationToolBarMenus} from '../config/simulationToolBarMenuData.js'
 import {createBootstrapTooltipDirective} from '../assets/bootstrap/tooltipController.js'
-import {INPUT_PROPERTY_DEFAULTS, getInputType, isValidInputProperty, getDefaultWorkpieceDimensions} from '../utils/inputRules.js'
+import {INPUT_PROPERTY_DEFAULTS, INPUT_RULE_DEFAULT_DIMENSIONS, getInputType, isValidInputProperty} from '../utils/inputRules.js'
 import {WORKSTATION_PROPERTY_DEFAULTS, PARALLEL_WORKSTATION_PROPERTY_DEFAULTS, isValidWorkstationProperty, isValidParallelWorkstationProperty, ensureParallelWorkstationEquipment} from '../utils/workstationProperties.js'
 import {ASSEMBLY_MODES, CONTAINER_TYPES, getAssemblyPackingType, getAssemblyRecipeError, getAssemblyUnitCount, isValidAssemblyUnitCount} from '../utils/assemblyRecipes.js'
 import {DISASSEMBLY_MODES, getDisassemblyRecipeError, getDisassemblyUnitCount, isValidDisassemblyUnitCount} from '../utils/disassemblyRecipes.js'
 import {BUFFER_PROPERTY_DEFAULTS, isValidBufferProperty} from '../utils/bufferProperties.js'
 import {fitComponentPorts, getLocalComponentPorts, setComponentPortOffset} from '../utils/componentPorts.js'
 import {createInputSimulation} from '../utils/inputSimulation.js'
-import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry, getConnectionSegmentMove} from '../utils/connectionLine.js'
+import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry, getConnectionSegmentMove, getEditableRouteGeometry} from '../utils/connectionLine.js'
 import {clampCanvasOffset, encloseCanvasBounds, fitsCanvasBounds, getCanvasItemBounds, getCanvasMoveBounds, getCanvasSizeError} from '../utils/canvasBoundary.js'
 import {distanceToCollisionFootprint, getCollisionFootprint, hasComponentCollision, hasTriangleVertexSweepCollision, resolveComponentDrag} from '../utils/componentCollision.js'
 import {getLocalTriangleVertices, getTriangleChanges, getTriangleVertices, orientTriangle, TRIANGULAR_OBSTACLE_TYPE} from '../utils/triangleObstacle.js'
@@ -417,8 +424,19 @@ const handleFiniteCanvasToggle = (event) => {
     }}
 }
 const dialogItem = computed(() => placedComponents.value.find(item => item.id === activeDialog.value?.itemId))
+const componentPropertiesId = ref(null)
+const componentPropertiesItem = computed(() => placedComponents.value.find(item => item.id === componentPropertiesId.value))
+watch(componentPropertiesItem, item => {
+    if (!item) componentPropertiesId.value = null
+})
+
+function openComponentProperties(id) {
+    const item = placedComponents.value.find(component => component.id === id)
+    if (PRODUCTION_COMPONENT_TYPES.has(item?.type)) componentPropertiesId.value = id
+}
+
 const findConnectionCorner = (item, index) => Number.isInteger(index) && index >= 0
-    ? getConnectionGeometry(item, placedComponents.value)?.rows[index * 2 + 1]
+    ? getEditableRouteGeometry(item, placedComponents.value)?.rows[index * 2 + 1]
     : null
 const dialogConnectionCorner = computed(() => activeDialog.value?.dialogType === 'connection-radius'
     ? findConnectionCorner(dialogItem.value, activeDialog.value.rowIndex)
@@ -440,6 +458,10 @@ const openDialog = ({itemId, dialogType, rowIndex = null, editMode}) => {
         if (item.type === RECTANGULAR_WALL_TYPE) activeDialog.value = {itemId, dialogType, key: ++nextDialogKey}
         return
     }
+    if (dialogType === 'agv-configuration') {
+        if (item.type === AGV_CONFIGURATION_TYPE) activeDialog.value = {itemId, dialogType, key: ++nextDialogKey}
+        return
+    }
     const isDisassembly = dialogType === 'disassembly-recipe'
     if (isDisassembly && item.type !== 'disassemblyWorkstation') return
     const recipes = isDisassembly ? item.disassemblyRecipes : item.assemblyRecipes
@@ -459,7 +481,7 @@ const openDialog = ({itemId, dialogType, rowIndex = null, editMode}) => {
     }
     activeDialog.value = {itemId, dialogType, recipe, mode, packingType, key: ++nextDialogKey}
 }
-const saveDialog = ({itemId, dialogType, properties, assemblyRecipe, disassemblyRecipe, radius, canvasSize, triangleVertices, wallExits}) => {
+const saveDialog = ({itemId, dialogType, properties, assemblyRecipe, disassemblyRecipe, radius, canvasSize, triangleVertices, wallExits, agvRows}) => {
     if (itemId !== activeDialog.value?.itemId || dialogType !== activeDialog.value?.dialogType) return
     if (dialogType === 'finite-canvas') {
         if (getCanvasSizeError(canvasSize, minimumCanvasSize.value)) return
@@ -490,6 +512,8 @@ const saveDialog = ({itemId, dialogType, properties, assemblyRecipe, disassembly
         if (!applyTriangleDefinition(triangleVertices)) return
     } else if (dialogType === 'wall-exits') {
         if (!applyWallExits(wallExits)) return
+    } else if (dialogType === 'agv-configuration') {
+        if (!applyAgvRows(agvRows)) return
     } else {
         handleUpdateComponentProperties({id: itemId, ...properties})
     }
@@ -554,6 +578,10 @@ const handleAddLog = (message) => {
 
 // 画布放置控件后，加入统一列表
 const handleComponentPlaced = recordCanvasEdit((component) => {
+    if (component.type === AGV_CONFIGURATION_TYPE && findAgvConfiguration(placedComponents.value)) {
+        handleAddLog(DUPLICATE_AGV_CONFIGURATION_MESSAGE)
+        return
+    }
     if (component.type === RECTANGULAR_WALL_TYPE) {
         const settings = getWallSettings(component)
         const error = getWallValidationError({...component, ...settings})
@@ -575,7 +603,7 @@ const handleComponentPlaced = recordCanvasEdit((component) => {
         handleAddLog('无法放置：连接线和 AGV 路径必须从围墙出口通过。')
         return
     }
-    if (component.type === 'connectionLine' && component.affectedEndpoint === undefined) {
+    if ((component.type === 'connectionLine' || component.type === 'AGVpath') && component.affectedEndpoint === undefined) {
         component.affectedEndpoint = 'to'
     }
     if (component.type === 'connectionLine' && component.workpieceSpeed === undefined) {
@@ -610,11 +638,16 @@ const handleComponentPlaced = recordCanvasEdit((component) => {
     if (component.type === 'buffer') {
         for (const [field, value] of Object.entries(BUFFER_PROPERTY_DEFAULTS)) component[field] ??= value
     }
+    if (component.type === AGV_CONFIGURATION_TYPE) {
+        component.agvRangeEnabled ??= false
+        component.agvRange ??= null
+        component.agvRows ??= []
+    }
     if (component.type === 'systemInput' && component.inputRuleRows === undefined) {
         component.inputRuleRows = [{
             partType: getInputType(component),
             name: '',
-            ...getDefaultWorkpieceDimensions(component),
+            ...INPUT_RULE_DEFAULT_DIMENSIONS,
             fillColor: '#22c55e',
             relativeWeight: 100,
         }]
@@ -739,6 +772,19 @@ const applyWallExits = recordCanvasEdit(wallExits => {
     return true
 })
 
+const applyAgvRows = recordCanvasEdit(rows => {
+    const config = dialogItem.value
+    if (config?.type !== AGV_CONFIGURATION_TYPE || getAgvRowsError(rows, placedComponents.value)) return false
+    config.agvRows = rows.map(row => ({...row}))
+    return true
+})
+
+function clearAgvParkingAssignment(stationId) {
+    const config = findAgvConfiguration(placedComponents.value)
+    const index = config?.agvRows?.findIndex(row => row.stationId === stationId) ?? -1
+    if (index !== -1) config.agvRows.splice(index, 1)
+}
+
 function routeChangesAreClear(...proposed) {
     if (!hasWallRouteCollision(placedComponents.value, proposed)) return true
     handleAddLog('无法修改：连接线或 AGV 路径会穿过实体墙。')
@@ -853,10 +899,18 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
                                              disassemblyMode,
                                              disassemblyRecipes,
                                              bufferCapacity,
-                                             minimumStayTime
+                                             minimumStayTime,
+                                             agvRangeEnabled,
+                                             agvRange
                                          }) => {
     const target = placedComponents.value.find((item) => item.id === id)
     if (!target) return
+
+    if (target.type === AGV_CONFIGURATION_TYPE) {
+        if (typeof agvRangeEnabled === 'boolean') target.agvRangeEnabled = agvRangeEnabled
+        if (!target.agvRangeEnabled) target.agvRange = null
+        else if (isValidAgvRange(agvRange)) target.agvRange = agvRange
+    }
 
     if (target.type === CIRCULAR_OBSTACLE_TYPE) {
         resizeCircleObstacle(target, circleRadius)
@@ -879,12 +933,17 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
         return
     }
 
-    if (target.type === 'connectionLine') {
+    const isAgvPath = target.type === 'AGVpath'
+    if (target.type === 'connectionLine' || isAgvPath) {
         if (affectedEndpoint === 'to' || affectedEndpoint === 'from') target.affectedEndpoint = affectedEndpoint
-        if (Number.isFinite(workpieceSpeed) && workpieceSpeed >= 0) target.workpieceSpeed = workpieceSpeed
-        if (!connectionSegment && !connectionRadius && length === undefined && angle === undefined) return
-        const geometry = getConnectionGeometry(target, placedComponents.value)
-        if (!geometry || geometry.from.id === geometry.to.id) return
+    }
+    if (target.type === 'connectionLine' && Number.isFinite(workpieceSpeed) && workpieceSpeed >= 0) {
+        target.workpieceSpeed = workpieceSpeed
+    }
+    if ((target.type === 'connectionLine' || isAgvPath) &&
+        (connectionSegment || connectionRadius || length !== undefined || angle !== undefined)) {
+        const geometry = getEditableRouteGeometry(target, placedComponents.value)
+        if (!geometry || (!isAgvPath && geometry.from.id === geometry.to.id)) return
         if (connectionRadius) {
             const {index, radius} = connectionRadius
             const row = Number.isInteger(index) && index >= 0 ? geometry.rows[index * 2 + 1] : null
@@ -894,39 +953,46 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
             return
         }
         const edit = connectionSegment ?? {index: 0, length, angle}
-        const update = getConnectionSegmentMove(geometry, edit.index, edit, target.affectedEndpoint ?? 'to')
+        const update = getConnectionSegmentMove(geometry, edit.index, edit, target)
         if (!update) return
-        const {point, nodeIndex, endpoint} = update
-        if (geometry.nodes.length === 2) {
-            const moving = endpoint === 'from' ? geometry.from : geometry.to
-            const port = geometry.nodes[nodeIndex]
-            const x = Number((moving.x + point.x - port.x).toFixed(10))
-            const y = Number((moving.y + point.y - port.y).toFixed(10))
+        const {point, nodeIndex} = update
+        const segmentAngles = geometry.rows.filter(row => row.type === 'Line')
+            .map(row => row.index === edit.index ? update.angle : row.angle)
+        const routeLabel = isAgvPath ? 'AGV 路径' : '连接线'
+        if (nodeIndex === 0 || nodeIndex === geometry.nodes.length - 1) {
+            const moving = nodeIndex === 0 ? geometry.from : geometry.to
+            if (!moving || (geometry.nodes.length === 2 &&
+                (!geometry.from || !geometry.to || geometry.from.id === geometry.to.id))) return
+            // 按路径端点的世界坐标差平移整个组件，保留上下料点的局部坐标。
+            const anchor = geometry.nodes[nodeIndex]
+            const x = Number((moving.x + (point.x - anchor.x)).toFixed(10))
+            const y = Number((moving.y + (point.y - anchor.y)).toFixed(10))
             if (canvasBoundary.value) {
                 const bounds = getCanvasMoveBounds(new Set([moving.id]), placedComponents.value)
                 if (!fitsCanvasBounds({...bounds, x: bounds.x + x - moving.x, y: bounds.y + y - moving.y}, canvasBoundary.value)) {
-                    handleAddLog('有限画布：调整连接线会使端点上的组件越界。')
+                    handleAddLog(`有限画布：调整${routeLabel}会使端点上的组件越界。`)
                     return
                 }
             }
             if ((x !== moving.x || y !== moving.y) && !handleUpdateComponentPosition({id: moving.id, x, y})) return
-            target.angle = update.angle
+            if (!isAgvPath && geometry.nodes.length === 2) target.angle = update.angle
+            else target.segmentAngles = segmentAngles
         } else {
-            const waypoints = target.waypoints.map((waypoint, i) => i === nodeIndex - 1 ? point : waypoint)
-            if (canvasBoundary.value && !fitsCanvasBounds(getCanvasItemBounds({...target, waypoints}), canvasBoundary.value)) {
-                handleAddLog('有限画布：调整连接线会使拐点越界。')
+            const nodes = geometry.nodes.map((node, i) => i === nodeIndex ? point : node)
+            const changes = isAgvPath ? {nodes} : {waypoints: nodes.slice(1, -1)}
+            const proposed = {...target, ...changes, segmentAngles, cornerRadii: geometry.cornerRadii}
+            if (canvasBoundary.value && !fitsCanvasBounds(getCanvasItemBounds(proposed), canvasBoundary.value)) {
+                handleAddLog(`有限画布：调整${routeLabel}会使拐点越界。`)
                 return
             }
-            if (!routeChangesAreClear({...target, waypoints, cornerRadii: geometry.cornerRadii})) return
-            target.waypoints = waypoints
-            target.segmentAngles = geometry.rows.filter(row => row.type === 'Line').map(row => row.index === edit.index ? update.angle : row.angle)
-            target.cornerRadii = geometry.cornerRadii
-            const adjusted = getConnectionGeometry(target, placedComponents.value)
-            if (adjusted) target.cornerRadii = adjusted.cornerRadii
+            const adjusted = getPathParameters(nodes, proposed)
+            if (!Number.isFinite(adjusted?.length) || !routeChangesAreClear(proposed)) return
+            Object.assign(target, changes, {segmentAngles, cornerRadii: adjusted.cornerRadii})
         }
-        target.affectedEndpoint = endpoint
         return
     }
+
+    if (target.type === 'connectionLine') return
 
     if (target.type === 'systemInput') {
         const inputProperties = {inputType, generationInterval, firstGenerationTime, maxOutputCount, inputCloseTime, inputCloseEnabled, workpieceDisplayMode}
@@ -976,7 +1042,7 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
         }
     }
 
-    if (target.type === 'AGVpath') {
+    if (isAgvPath) {
         if (Number.isFinite(pathWidth) && pathWidth > 0) {
             const nextWidth = Math.max(0.01, Number(pathWidth.toFixed(2)))
             if (!canvasBoundary.value || fitsCanvasBounds(getCanvasItemBounds({...target, pathWidth: nextWidth}), canvasBoundary.value)) {
@@ -993,8 +1059,12 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
             if (routeChangesAreClear(proposed)) target.cornerRadii = proposed.cornerRadii
         }
         if (reverseDirection) {
+            const path = getPathParameters(target.nodes, target)
             target.nodes = [...(target.nodes || [])].reverse()
-            target.cornerRadii = [...(target.cornerRadii || [])].reverse()
+            target.cornerRadii = (path?.cornerRadii ?? []).reverse()
+            if (target.segmentAngles) {
+                target.segmentAngles = [...target.segmentAngles].reverse().map(angle => angle > 0 ? angle - 180 : angle + 180)
+            }
             if (target.segments) target.segments = [...target.segments].reverse()
             ;
             [target.fromId, target.toId] = [target.toId, target.fromId]
@@ -1015,7 +1085,11 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
         if (updateHeight) Object.assign(changes, {height, y: target.type === 'node' ? centerY : centerY - height / 2})
         if (rotate) changes.quarterTurns = (getComponentQuarterTurns(target) + rotationDelta + 4) % 4
         const proposed = {...target, ...changes}
-        if (canvasBoundary.value && !fitsCanvasBounds(getCanvasItemBounds(proposed), canvasBoundary.value)) {
+        const agvAssignment = target.type === 'node'
+            ? findAgvConfiguration(placedComponents.value)?.agvRows?.find(row => row.stationId === id) : null
+        if (agvAssignment && agvAssignment.count > getAgvParkingCapacity(proposed, agvAssignment)) {
+            handleAddLog('无法缩小停靠站点：新尺寸放不下已配置的 AGV，请先调整 AGV 数量。')
+        } else if (canvasBoundary.value && !fitsCanvasBounds(getCanvasItemBounds(proposed), canvasBoundary.value)) {
             handleAddLog('有限画布：调整尺寸或方向会使组件越界。')
         } else if (hasComponentCollision(placedComponents.value, [proposed])) {
             handleAddLog('无法调整尺寸或方向：组件占地会与其他组件重叠。')
@@ -1035,6 +1109,7 @@ const handleUpdateComponentProperties = recordCanvasEdit(({
     if (target.type === 'node' && station) {
         if (getStationType(target).value !== station.value) {
             target.index = getNextStationIndex(placedComponents.value, station.value, target.id)
+            if (station.value !== 'parking') clearAgvParkingAssignment(target.id)
         }
         target.stationType = station.value
         target.name = station.label
@@ -1090,25 +1165,9 @@ const handleUpdateComponentPositions = recordCanvasEdit((positions) => {
 
 // 结合转弯角度和相邻线段长度，限制圆弧半径，避免相邻圆弧交叠。
 const clampAGVPathCornerRadii = (component) => {
-    if (!component.cornerRadii || !component.nodes) return
-
-    let changed = false
-    component.cornerRadii.forEach((radius, i) => {
-        if (radius === 0) return
-
-        // cornerRadii[i] 对应 nodes[i+1]（第 i 个拐点，不含起终点）
-        const maxRadius = getCornerMaxRadius(component.nodes, i)
-
-        if (radius > maxRadius) {
-            component.cornerRadii[i] = maxRadius
-            changed = true
-        }
-    })
-
-    // 触发响应式更新
-    if (changed) {
-        component.cornerRadii = [...component.cornerRadii]
-    }
+    if (!component.cornerRadii) return
+    const path = getPathParameters(component.nodes, component)
+    if (path) component.cornerRadii = path.cornerRadii
 }
 
 // 画布上双击标签改名后，写回单一数据源。
@@ -1123,6 +1182,7 @@ const handleRenameComponent = recordCanvasEdit(({id, displayName}) => {
 const handleRemoveComponent = recordCanvasEdit((id) => {
     const target = placedComponents.value.find((item) => item.id === id)
     if (!target) return
+    if (target.type === 'node') clearAgvParkingAssignment(id)
 
     // 连着被删控件的连接线会失去一端，必须一并删除，否则画布上会残留悬空的线
     const orphanLines = placedComponents.value.filter(

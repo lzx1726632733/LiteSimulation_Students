@@ -1,6 +1,7 @@
 export const PART_COLORS = ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#a855f7'];
 export const INPUT_ENTITY_TYPES = ['Workpiece', 'Pallet', 'Vehicle'];
 export const DEFAULT_INPUT_ENTITY_TYPE = INPUT_ENTITY_TYPES[0];
+export const INPUT_RULE_DEFAULT_DIMENSIONS = {length: 500, width: 400};
 
 export function getInputType(input) {
     return INPUT_ENTITY_TYPES.includes(input?.inputType) ? input.inputType : DEFAULT_INPUT_ENTITY_TYPE;
@@ -74,7 +75,7 @@ export function getInputRuleValidationMessage(rows) {
             return `请填写第 ${index + 1} 行的类别。`;
         }
         for (const field of ['length', 'width']) {
-            // 旧规则缺少尺寸时由输入组件的默认尺寸补齐。
+            // 旧规则缺少尺寸时使用输入规则的默认值。
             if (row[field] !== undefined && (!Number.isFinite(row[field]) || row[field] <= 0)) {
                 return `第 ${index + 1} 行的实际${field === 'length' ? '长度' : '宽度'}必须是大于 0 的有限数字，单位为毫米。`;
             }

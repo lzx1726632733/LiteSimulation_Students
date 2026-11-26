@@ -1,6 +1,6 @@
 <template>
     <div class="property-panel">
-        <div class="panel-header">
+        <div v-if="!processOnly" class="panel-header">
             <span class="panel-title">属性面板</span>
         </div>
         <div class="panel-content">
@@ -10,8 +10,8 @@
                 <p class="empty-text">请在画布中选择一个元素</p>
             </div>
 
-            <!-- 已选中元素 -->
-            <div v-else class="prop-list">
+            <!-- 侧边属性面板 -->
+            <div v-else-if="!processOnly" class="prop-list">
                 <!-- 基本信息 -->
                 <div class="prop-section">
                     <div class="section-title">基本信息</div>
@@ -80,23 +80,43 @@
                         <span class="color-value">{{ shadowColor }}</span>
                     </div>
                 </div>
-
-                <!-- 连接线：连接关系 -->
-                <div v-if="selectedItem.type === 'connectionLine'" class="prop-section">
-                    <div class="section-title">连接关系</div>
-                    <div class="prop-row">
-                        <span class="prop-key">起点</span>
-                        <span class="prop-value">{{ fromLabel }}</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-key">终点</span>
-                        <span class="prop-value">{{ toLabel }}</span>
-                    </div>
-                    <div class="section-title" style="margin-top: 10px">连接线属性</div>
+                <!-- 两条连接线 -->
+                <div v-if="selectedItem.type === 'connectionLine' || selectedItem.type === 'AGVpath'" class="prop-section">
+                    <template v-if="selectedItem.type === 'connectionLine'">
+                        <div class="section-title">连接关系</div>
+                        <div class="prop-row">
+                            <span class="prop-key">起点</span>
+                            <span class="prop-value">{{ fromLabel }}</span>
+                        </div>
+                        <div class="prop-row">
+                            <span class="prop-key">终点</span>
+                            <span class="prop-value">{{ toLabel }}</span>
+                        </div>
+                    </template>
+                    <template v-else>
+                        <div class="section-title">路径区域</div>
+                        <div class="prop-row dimension-row">
+                            <label class="prop-key" for="agv-path-width">通道宽度</label>
+                            <input id="agv-path-width" class="property-input" type="number" min="0.01" step="0.01"
+                                   :value="pathWidthInMeters" @change="handlePathWidthChange"
+                                   @blur="handlePathWidthChange"/>
+                            <span class="property-unit">m</span>
+                        </div>
+                        <div class="prop-row">
+                            <span class="prop-key">行驶方向</span>
+                            <span class="prop-value">起点 → 终点</span>
+                            <button class="property-action-button" type="button"
+                                    @click="emit('update-component-properties', { id: selectedItem.id, reverseDirection: true })">
+                                反向
+                            </button>
+                        </div>
+                    </template>
+                    <div v-if="selectedItem.type === 'connectionLine'" class="section-title" style="margin-top: 10px">连接线属性</div>
+                    <div v-else class="section-title connection-table-title">路径参数</div>
                     <div class="prop-row dimension-row">
                         <span id="connection-affected-endpoint-label" class="prop-key">更改时影响</span>
                         <div class="connection-endpoint-options" role="radiogroup" aria-labelledby="connection-affected-endpoint-label"
-                             title="编辑直线长度或角度时，调整所选一端。折线首段固定起点，末段固定终点。">
+                             title="编辑直线长度或角度时，移动该线段所选的一端。若该端连着站点或组件，则移动整个站点或组件。">
                             <label v-for="option in connectionEndpointOptions" :key="option.value" class="square-radio-label">
                                 <input type="radio" class="square-radio" :name="`connection-endpoint-${selectedItem.id}`"
                                        :value="option.value" :checked="connectionAffectedEndpoint === option.value"
@@ -105,7 +125,7 @@
                             </label>
                         </div>
                     </div>
-                    <div class="prop-row dimension-row">
+                    <div v-if="selectedItem.type === 'connectionLine'" class="prop-row dimension-row">
                         <label class="prop-key" for="connection-workpiece-speed">工件速度</label>
                         <input id="connection-workpiece-speed" class="property-input" type="number" min="0" step="0.01"
                                :value="connectionWorkpieceSpeed"
@@ -114,7 +134,7 @@
                                @keydown.enter.prevent="$event.target.blur()"/>
                         <span class="property-unit">m/s</span>
                     </div>
-                    <div class="section-title connection-table-title">线条参数</div>
+                    <div v-if="selectedItem.type === 'connectionLine'" class="section-title connection-table-title">线条参数</div>
                     <table class="connection-table">
                         <thead>
                             <tr>
@@ -163,41 +183,6 @@
                     </table>
                     <p v-if="connectionCellError" class="connection-edit-error" role="status">{{ connectionCellError }}</p>
                 </div>
-
-                <!-- AGV 路径：连接关系和圆角设置 -->
-                <div v-else-if="selectedItem.type === 'AGVpath'" class="prop-section">
-                    <div class="section-title">路径区域</div>
-                    <div class="prop-row dimension-row">
-                        <label class="prop-key" for="agv-path-width">通道宽度</label>
-                        <input id="agv-path-width" class="property-input" type="number" min="0.01" step="0.01"
-                               :value="pathWidthInMeters" @change="handlePathWidthChange"
-                               @blur="handlePathWidthChange"/>
-                        <span class="property-unit">m</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-key">行驶方向</span>
-                        <span class="prop-value">起点 → 终点</span>
-                        <button class="path-direction-btn"
-                                @click="emit('update-component-properties', { id: selectedItem.id, reverseDirection: true })">
-                            反向
-                        </button>
-                    </div>
-                    <div class="section-title">连接关系</div>
-                    <div class="prop-row">
-                        <span class="prop-key">起点站点</span>
-                        <span class="prop-value">{{ fromLabel }}</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-key">终点站点</span>
-                        <span class="prop-value">{{ toLabel }}</span>
-                    </div>
-                    <div class="prop-row">
-                        <span class="prop-key">节点数</span>
-                        <span class="prop-value">{{ selectedItem.nodes?.length || 0 }}</span>
-                    </div>
-
-                </div>
-
                 <!-- 普通控件和站点：可编辑的中心点物理坐标 -->
                 <div v-else class="prop-section">
                     <div class="section-title">中心点物理坐标</div>
@@ -302,8 +287,43 @@
                         </button>
                     </div>
                 </div>
-                <!-- 矩形控件独特功能 -->
-                <div class="prop-section" >
+                <!-- AGV配置 -->
+                <div v-if="selectedItem.type === 'AGVconfiguration'" class="input-settings" :key="selectedItem.id">
+                    <div class="section-title">AGV配置</div>
+                    <div class="prop-row input-property-row input-close-row">
+                        <label class="prop-key" for="agv-range">AGV续航</label>
+                        <input id="agv-range" class="property-input" type="text" inputmode="decimal"
+                               :value="agvRangeText" :disabled="!selectedItem.agvRangeEnabled"
+                               title="输入非负距离（米），∞ 表示无限续航。"
+                               @blur="handleAgvRangeChange" @keydown.enter.prevent="$event.target.blur()"/>
+                        <span class="property-unit">m</span>
+                        <label class="input-close-toggle">
+                            <input type="checkbox" :checked="selectedItem.agvRangeEnabled"
+                                   @change="emit('update-component-properties', {id: selectedItem.id, agvRangeEnabled: $event.target.checked})"/>
+                            启用
+                        </label>
+                    </div>
+                    <table class="shape-properties-table" aria-label="AGV配置清单">
+                        <thead>
+                            <tr><th scope="col">序号</th><th scope="col">AGV起始站点</th><th scope="col">AGV数量</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr v-for="(row, index) in selectedItem.agvRows" :key="row.stationId">
+                                <th scope="row">{{ index + 1 }}</th>
+                                <td>{{ resolveLabel(row.stationId) }}</td>
+                                <td>{{ row.count }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div class="assembly-actions">
+                        <button type="button" @click="emit('open-dialog', {itemId: selectedItem.id, dialogType: 'agv-configuration'})">
+                            编辑表格
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div v-else class="prop-list">
+                <div class="prop-section">
                     <!--  输入控件  -->
                     <div v-if="selectedItem.type === 'systemInput'" class="input-settings" :key="selectedItem.id">
                         <div class="section-title" >工件属性</div>
@@ -539,12 +559,13 @@ import {STATION_TYPES, getStationType, getComponentFootprint, getComponentCenter
 import clockwiseIcon from "../assets/icons/clockwise.svg";
 import anticlockwiseIcon from "../assets/icons/anticlockwise.svg";
 import {getPathWidth} from "../utils/agvPath.js";
+import {parseAgvRange} from "../utils/agvConfiguration.js";
 import {CIRCULAR_OBSTACLE_TYPE, getCircleRadius, getDefaultShadowColor, MIN_CIRCLE_RADIUS, RESIZABLE_COMPONENT_TYPES} from "../utils/componentAppearance.js";
 import {formatTriangleValue, getLocalTriangleVertices, getTriangleParameters, TRIANGLE_FIELDS, TRIANGULAR_OBSTACLE_TYPE} from "../utils/triangleObstacle.js";
 import {getWallSettings, RECTANGULAR_WALL_TYPE, WALL_SIDES, WALL_THICKNESS_MODES} from "../utils/rectangularWall.js";
 import {INPUT_ENTITY_TYPES, INPUT_PROPERTY_DEFAULTS, getInputType, isValidInputProperty, parseGenerationInterval, formatGenerationInterval} from "../utils/inputRules.js";
 import {WORKSTATION_PROPERTY_DEFAULTS, PARALLEL_WORKSTATION_PROPERTY_DEFAULTS, isValidWorkstationProperty, isValidParallelWorkstationProperty} from "../utils/workstationProperties.js";
-import {DEFAULT_WORKPIECE_SPEED, getConnectionGeometry} from "../utils/connectionLine.js";
+import {DEFAULT_WORKPIECE_SPEED, getEditableRouteGeometry} from "../utils/connectionLine.js";
 import {ASSEMBLY_MODES, getAssemblyPackingType, getAssemblyUnitCount, isValidAssemblyUnitCount} from "../utils/assemblyRecipes.js";
 import {DISASSEMBLY_MODES, getDisassemblyUnitCount, isValidDisassemblyUnitCount} from "../utils/disassemblyRecipes.js";
 import {getBufferProperty, isValidBufferProperty} from "../utils/bufferProperties.js";
@@ -562,6 +583,7 @@ const props = defineProps({
         default: () => [],
     },
     canvasBoundary: {type: Object, default: null},
+    processOnly: {type: Boolean, default: false},
 });
 const emit = defineEmits(["update-component-properties", "update-component-position", "open-dialog"]);
 const wallSettings = computed(() => props.selectedItem?.type === RECTANGULAR_WALL_TYPE
@@ -721,7 +743,7 @@ function deleteAssemblyRecipe() {
     });
     selectAssemblyRow(null);
 }
-const connectionGeometry = computed(() => getConnectionGeometry(props.selectedItem, props.placedComponents));
+const connectionGeometry = computed(() => getEditableRouteGeometry(props.selectedItem, props.placedComponents));
 const connectionWorkpieceSpeed = computed(() => props.selectedItem?.workpieceSpeed ?? DEFAULT_WORKPIECE_SPEED);
 const connectionEndpointOptions = [{value: 'to', label: '终点'}, {value: 'from', label: '起点'}];
 const connectionAffectedEndpoint = computed(() => props.selectedItem?.affectedEndpoint === 'from' ? 'from' : 'to');
@@ -856,6 +878,18 @@ const handleInputPropertyChange = (field, event) => {
 };
 const shadowColor = computed(() => props.selectedItem?.shadowColor || getDefaultShadowColor(props.selectedItem?.type));
 const pathWidthInMeters = computed(() => props.selectedItem ? Number(getPathWidth(props.selectedItem).toFixed(2)) : 1);
+const agvRangeText = computed(() => String(props.selectedItem?.agvRangeEnabled ? props.selectedItem.agvRange ?? '∞' : '∞'));
+
+function handleAgvRangeChange(event) {
+    const item = props.selectedItem;
+    if (item?.type !== 'AGVconfiguration' || !item.agvRangeEnabled) return;
+    const range = parseAgvRange(event.target.value);
+    if (range !== undefined && range !== (item.agvRange ?? null)) {
+        emit('update-component-properties', {id: item.id, agvRange: range});
+    }
+    event.target.value = agvRangeText.value;
+}
+
 const handlePathWidthChange = (event) => {
     const item = props.selectedItem;
     if (item?.type !== "AGVpath") return;
@@ -991,7 +1025,7 @@ const handleShadowColorChange = (event) => {
     transform: translateY(-70%) rotate(45deg);
     pointer-events: none;
 }
-.input-rule-row .btn { justify-content: center; margin: 0; padding: 4px; }
+.input-rule-row .btn { justify-content: center; min-width: 0; margin: 0; padding: 4px; }
 .input-rule-row .btn-img { margin: 0; }
 .input-close-toggle { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; color: #6b7280; cursor: pointer; }
 .input-close-toggle input { margin: 0; accent-color: #0780ff; }
@@ -1010,8 +1044,11 @@ const handleShadowColorChange = (event) => {
 .assembly-table tr.selected { background: #dbeafe; color: #1e40af; }
 .assembly-table tr:focus-visible { outline: 1px solid #2563eb; outline-offset: -1px; }
 .assembly-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.assembly-actions button { flex: 1 0 auto; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 4px; background: white; font: inherit; font-size: 12px; cursor: pointer; }
-.assembly-actions button:hover{ background-color: #e8eaf0 }
+.assembly-actions button { flex: 1 0 auto; }
+.assembly-actions button,
+.property-action-button { padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 4px; background: white; font: inherit; font-size: 12px; cursor: pointer; }
+.assembly-actions button:hover,
+.property-action-button:hover { background-color: #e8eaf0; }
 .assembly-actions button:disabled { opacity: .5; cursor: default; }
 .shape-properties-table { width: 100%; border-collapse: collapse; border: 1px solid #dbe2eb; font-size: 13px; }
 .shape-properties-table th, .shape-properties-table td {
@@ -1054,14 +1091,6 @@ const handleShadowColorChange = (event) => {
 .square-radio:checked { border-color: #0780ff; background: #0780ff; }
 .square-radio:checked::after { content: '✓'; color: white; font-size: 11px; line-height: 12px; }
 .square-radio:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
-.path-direction-btn {
-    padding: 3px 8px;
-    border: 1px solid #d1d5db;
-    border-radius: 3px;
-    background: #f9fafb;
-    color: #047857;
-    cursor: pointer;
-}
 .btn {
     display: flex;
     border-radius: 8px;

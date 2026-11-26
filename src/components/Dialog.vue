@@ -106,6 +106,56 @@
             <p v-if="bomError" class="rule-error" role="alert">{{ bomError }}</p>
         </template>
 
+        <template v-else-if="isAgvConfigurationEditor">
+            <div class="table-container">
+                <table class="agv-configuration-table" aria-label="AGV配置清单">
+                    <thead>
+                        <tr>
+                            <th class="row-number" scope="col">序号</th>
+                            <th scope="col">AGV起始站点</th>
+                            <th scope="col">AGV数量</th>
+                            <th v-for="field in agvNumericFields" :key="field.key" scope="col" :title="`单位：${field.unit}`">{{ field.label }}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, index) in agvRows" :key="index" :class="{selected: selectedAgvRow === index}"
+                            @click="selectedAgvRow = index" @focusin="selectedAgvRow = index">
+                            <th class="row-number" scope="row">{{ index + 1 }}</th>
+                            <td>
+                                <select class="cell-input" :value="row.stationId" :aria-label="`第 ${index + 1} 行 AGV起始站点`"
+                                        @change="setAgvStation(row, $event.target.value)">
+                                    <option value="">请选择</option>
+                                    <option v-for="station in availableAgvStations(row)" :key="station.id" :value="station.id">
+                                        {{ getComponentLabel(station) }}
+                                    </option>
+                                </select>
+                            </td>
+                            <td>
+                                <select class="cell-input" v-model="row.count" :disabled="!agvCapacities[index]"
+                                        :aria-label="`第 ${index + 1} 行 AGV数量`">
+                                    <option value="" disabled>请选择</option>
+                                    <option v-for="count in Math.min(agvCapacities[index], agvCountOptionLimit)"
+                                            :key="count" :value="count">{{ count }}</option>
+                                    <option v-if="row.count > agvCountOptionLimit && row.count <= agvCapacities[index]"
+                                            :value="row.count">{{ row.count }}</option>
+                                </select>
+                                <input v-if="agvCapacities[index] > agvCountOptionLimit" class="cell-input"
+                                       v-model.number="row.count" type="number" min="1" :max="agvCapacities[index]"
+                                       step="1" :aria-label="`第 ${index + 1} 行直接输入 AGV数量`"
+                                       :title="`可直接输入数量，最大 ${agvCapacities[index]} 辆`"/>
+                            </td>
+                            <td v-for="field in agvNumericFields" :key="field.key">
+                                <input class="cell-input" v-model.number="row[field.key]" type="number" step="any"
+                                       :aria-label="`第 ${index + 1} 行 ${field.label}（${field.unit}）`"
+                                       :title="`单位：${field.unit}，须大于 0`"/>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p v-if="agvRowsError" class="rule-error" role="status">{{ agvRowsError }}</p>
+        </template>
+
         <form v-else-if="isConnectionRadiusEditor" id="connection-radius-form" class="numeric-dialog-form"
               @submit.prevent="saveConnectionRadius">
             <label for="connection-radius">半径（米）</label>
@@ -173,6 +223,12 @@
                 <button type="button" class="save-button" :disabled="!!bomError" @click="saveBomRecipe">确定</button>
                 <button type="button" @click="emit('close')">取消</button>
             </template>
+            <template v-else-if="isAgvConfigurationEditor">
+                <button type="button" @click="addAgvRow">增加行</button>
+                <button type="button" :disabled="selectedAgvRow === null" @click="deleteAgvRow">删除行</button>
+                <button type="button" class="save-button" :disabled="!!agvRowsError" @click="saveAgvRows">确认</button>
+                <button type="button" @click="emit('close')">取消</button>
+            </template>
             <template v-else-if="isConnectionRadiusEditor || isFiniteCanvasEditor">
                 <button type="submit" :form="isFiniteCanvasEditor ? 'finite-canvas-form' : 'connection-radius-form'"
                         class="save-button" :disabled="isFiniteCanvasEditor ? !!canvasSizeError : !radiusValid">确定</button>
@@ -202,11 +258,12 @@ import disassemblyIcon from '../assets/icons/disassemblyWorkstation.svg';
 import connectionIcon from '../assets/icons/connectionLine.svg';
 import canvasIcon from '../assets/icons/canvas.svg';
 import triangleIcon from '../assets/icons/triangularObstacle.svg';
-import {PART_COLORS, getInputType, getInputRuleCategory, getInputRuleProbabilities, getInputRuleValidationMessage, getDefaultWorkpieceDimensions, parseGenerationInterval, formatGenerationInterval} from '../utils/inputRules.js';
+import {PART_COLORS, INPUT_RULE_DEFAULT_DIMENSIONS, getInputType, getInputRuleCategory, getInputRuleProbabilities, getInputRuleValidationMessage, parseGenerationInterval, formatGenerationInterval} from '../utils/inputRules.js';
 import {CONTAINER_TYPES, getAssemblyRecipeError} from '../utils/assemblyRecipes.js';
 import {getDisassemblyRecipeError} from '../utils/disassemblyRecipes.js';
 import {getCanvasSizeError} from '../utils/canvasBoundary.js';
 import {formatTriangleValue, solveTriangle, TRIANGLE_FIELDS} from '../utils/triangleObstacle.js';
+import {AGV_CONFIGURATION_TYPE, DEFAULT_AGV_DIMENSIONS, DEFAULT_AGV_SPEED, getAgvDimensions, getAgvParkingStations, getAgvParkingCapacity, getAgvRowsError} from '../utils/agvConfiguration.js';
 
 const props = defineProps({
     item: {type: Object, default: null},
@@ -220,6 +277,7 @@ const props = defineProps({
     canvasSize: {type: Object, default: null},
     minimumCanvasSize: {type: Object, default: undefined},
     validateTriangle: {type: Function, default: null},
+    placedComponents: {type: Array, default: () => []},
 });
 const emit = defineEmits(['close', 'save']);
 const inputType = computed(() => getInputType(props.item));
@@ -236,9 +294,52 @@ const dialogDefinition = computed(() => dialogDefinitions[props.item?.type]?.[pr
 const isAssemblyEditor = computed(() => props.item?.type === 'assemblyWorkstation' && props.dialogType === 'assembly-recipe');
 const isDisassemblyEditor = computed(() => props.item?.type === 'disassemblyWorkstation' && props.dialogType === 'disassembly-recipe');
 const isBomEditor = computed(() => isAssemblyEditor.value || isDisassemblyEditor.value);
-const isConnectionRadiusEditor = computed(() => props.item?.type === 'connectionLine' && props.dialogType === 'connection-radius');
+const isConnectionRadiusEditor = computed(() => props.dialogType === 'connection-radius' &&
+    (props.item?.type === 'connectionLine' || props.item?.type === 'AGVpath'));
 const isFiniteCanvasEditor = computed(() => props.dialogType === 'finite-canvas');
 const isTriangleEditor = computed(() => props.dialogType === 'triangle-definition');
+const isAgvConfigurationEditor = computed(() => props.dialogType === 'agv-configuration' && props.item?.type === AGV_CONFIGURATION_TYPE);
+const agvNumericFields = [
+    {key: 'length', label: 'AGV长', unit: 'mm'},
+    {key: 'width', label: 'AGV宽', unit: 'mm'},
+    {key: 'emptySpeed', label: 'AGV空载速度', unit: 'm/s'},
+    {key: 'loadedSpeed', label: 'AGV负载速度', unit: 'm/s'},
+];
+const agvCountOptionLimit = 500;
+const agvRows = ref((props.item?.agvRows ?? []).map(row => ({...row, ...getAgvDimensions(row)})));
+const selectedAgvRow = ref(null);
+const agvParkingStations = computed(() => getAgvParkingStations(props.placedComponents));
+const agvStationById = computed(() => new Map(agvParkingStations.value.map(station => [station.id, station])));
+const agvCapacity = row => getAgvParkingCapacity(agvStationById.value.get(row.stationId), row);
+const agvCapacities = computed(() => agvRows.value.map(agvCapacity));
+const agvRowsError = computed(() => getAgvRowsError(agvRows.value, props.placedComponents));
+
+function availableAgvStations(row) {
+    const used = new Set(agvRows.value.filter(other => other !== row).map(other => other.stationId));
+    return agvParkingStations.value.filter(station => station.id === row.stationId || !used.has(station.id));
+}
+
+function setAgvStation(row, stationId) {
+    row.stationId = stationId;
+    row.count = agvCapacity(row) ? 1 : '';
+}
+
+function addAgvRow() {
+    agvRows.value.push({stationId: '', count: '', ...DEFAULT_AGV_DIMENSIONS, emptySpeed: DEFAULT_AGV_SPEED, loadedSpeed: DEFAULT_AGV_SPEED});
+    selectedAgvRow.value = agvRows.value.length - 1;
+}
+
+function deleteAgvRow() {
+    if (selectedAgvRow.value === null) return;
+    agvRows.value.splice(selectedAgvRow.value, 1);
+    selectedAgvRow.value = agvRows.value.length ? Math.min(selectedAgvRow.value, agvRows.value.length - 1) : null;
+}
+
+function saveAgvRows() {
+    if (agvRowsError.value) return;
+    emit('save', {itemId: props.item.id, dialogType: props.dialogType, agvRows: agvRows.value});
+}
+
 const triangleDraft = reactive({});
 const triangleSolution = computed(() => solveTriangle(triangleDraft));
 const triangleError = computed(() => triangleSolution.value.error ||
@@ -267,9 +368,10 @@ function saveCanvasSize() {
 }
 
 const activeDialogIcon = computed(() => {
+    if (isAgvConfigurationEditor.value) return props.item.icon || dialogIcon;
     if (isTriangleEditor.value) return triangleIcon;
     if (isFiniteCanvasEditor.value) return canvasIcon;
-    if (isConnectionRadiusEditor.value) return connectionIcon;
+    if (isConnectionRadiusEditor.value) return props.item.icon || connectionIcon;
     if (isDisassemblyEditor.value) return disassemblyIcon;
     if (isAssemblyEditor.value) return assemblyIcon;
     return dialogDefinition.value?.icon || dialogIcon;
@@ -277,6 +379,7 @@ const activeDialogIcon = computed(() => {
 const originalRecipe = isDisassemblyEditor.value ? props.disassemblyRecipe : props.assemblyRecipe;
 const durationField = isDisassemblyEditor.value ? 'disassemblyTime' : 'assemblyTime';
 const dialogTitle = computed(() => {
+    if (isAgvConfigurationEditor.value) return `${getComponentLabel(props.item)} · 编辑表格`;
     if (isTriangleEditor.value) return `${getComponentLabel(props.item)} · 定义三角形`;
     if (isFiniteCanvasEditor.value) return '有限画布';
     if (isConnectionRadiusEditor.value) return `${getComponentLabel(props.item)} · 编辑圆弧半径`;
@@ -350,8 +453,8 @@ watch(() => [props.item?.id, props.item?.type, props.dialogType], () => {
         ...row,
         partType: getInputRuleCategory({...row, entityType}) ?? '',
         name: row.name ?? '',
-        length: row.length ?? getDefaultWorkpieceDimensions(props.item).length,
-        width: row.width ?? getDefaultWorkpieceDimensions(props.item).width,
+        length: row.length ?? INPUT_RULE_DEFAULT_DIMENSIONS.length,
+        width: row.width ?? INPUT_RULE_DEFAULT_DIMENSIONS.width,
         fillColor: row.fillColor ?? PART_COLORS[index % PART_COLORS.length],
         relativeWeight: row.relativeWeight ?? 100,
     })) : [];
@@ -396,7 +499,7 @@ function addRow() {
     rows.value.push({
         partType: inputType.value,
         name: '',
-        ...getDefaultWorkpieceDimensions(props.item),
+        ...INPUT_RULE_DEFAULT_DIMENSIONS,
         fillColor: PART_COLORS[nextColorIndex % PART_COLORS.length],
         relativeWeight: 100,
     });
@@ -417,8 +520,8 @@ function clearRows() {
 }
 
 const compactDialog = isConnectionRadiusEditor.value || isFiniteCanvasEditor.value;
-const defaultWidth = isTriangleEditor.value ? 560 : compactDialog ? 440 : 920;
-const defaultHeight = isTriangleEditor.value ? 370 : compactDialog ? 260 : 560;
+const defaultWidth = isAgvConfigurationEditor.value ? 800 : isTriangleEditor.value ? 560 : compactDialog ? 440 : 920;
+const defaultHeight = isAgvConfigurationEditor.value ? 420 : isTriangleEditor.value ? 370 : compactDialog ? 260 : 560;
 onMounted(() => {
     initialNumericInput.value?.focus({preventScroll: true});
     initialNumericInput.value?.select();
@@ -451,6 +554,9 @@ th, td { height: 26px; padding: 0 6px; text-align: center; font-weight: normal; 
 thead { position: sticky; top: 0; z-index: 1; background: white; }
 thead th { height: 30px; border-right: 1px solid #e9edf2; border-bottom: 1px solid #e9edf2; }
 th:last-child { width: 24%; }
+.agv-configuration-table { min-width: 620px; }
+.agv-configuration-table th:last-child { width: auto; }
+.agv-configuration-table option { background: white; color: #1f2937; }
 .row-number { width: 40px; background: white; color: #1f2937; }
 tbody tr { cursor: default; }
 tbody tr.selected td { background: #065de8; color: white; }

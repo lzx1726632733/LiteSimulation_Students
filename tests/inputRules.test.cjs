@@ -8,7 +8,7 @@ const {parse, compileTemplate} = require('@vue/compiler-sfc');
 
 const rules = vm.runInNewContext(fs.readFileSync(path.resolve(__dirname, '../src/utils/inputRules.js'), 'utf8')
     .replace(/export (const|function) /g, '$1 ') +
-    '\n;({PART_COLORS, getInputType, getInputRuleCategory, getInputRuleValidationMessage, getInputRuleProbabilities, sampleInputRule, INPUT_PROPERTY_DEFAULTS, isValidInputProperty, parseGenerationInterval, formatGenerationInterval, getDefaultWorkpieceDimensions})');
+    '\n;({PART_COLORS, getInputType, getInputRuleCategory, getInputRuleValidationMessage, getInputRuleProbabilities, sampleInputRule, INPUT_PROPERTY_DEFAULTS, INPUT_RULE_DEFAULT_DIMENSIONS, isValidInputProperty, parseGenerationInterval, formatGenerationInterval})');
 const makeRows = weights => weights.map((relativeWeight, index) => ({partType: `Part${index + 1}`, relativeWeight}));
 
 test('generation interval defaults to one minute and supports duration formats with milliseconds', () => {
@@ -118,13 +118,16 @@ test('new rows default to Workpiece and continue cycling through seven colors af
 
 test('actual dimensions are editable positive numbers in millimeters and old rows receive defaults', () => {
     const {state, events, dispose} = createDialog([{partType: 'Part1', name: '', relativeWeight: 100}]);
-    assert.equal(state.rows.value[0].length, 2000);
-    assert.equal(state.rows.value[0].width, 1000);
+    assert.equal(state.rows.value[0].length, 500);
+    assert.equal(state.rows.value[0].width, 400);
     state.rows.value[0].length = 125.5;
     state.rows.value[0].width = 40;
     state.saveDialog();
     assert.equal(events[0].payload.properties.inputRuleRows[0].length, 125.5);
     assert.equal(events[0].payload.properties.inputRuleRows[0].width, 40);
+    state.addRow();
+    assert.equal(state.rows.value[1].length, 500);
+    assert.equal(state.rows.value[1].width, 400);
     for (const value of [0, -1, '', Infinity]) {
         state.rows.value[0].length = value;
         assert.ok(state.validationMessage.value);

@@ -11,7 +11,7 @@ const source = fs.readFileSync(filename, 'utf8');
 const { descriptor } = parse(source, { filename });
 const agvGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/agvPath.js'), 'utf8',
-).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getCornerMaxRadius, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds, getPathCorner, buildPathArc, getPathGeometryBounds, distanceToPathSegment, angleOnArc })');
+).replace(/export const /g, 'const ') + '\n;({ DEFAULT_PATH_WIDTH, getPathWidth, getPathParameters, buildPathGeometry, pointOnPathSegment, tracePathGeometry, isPointInPathArea, getPathBounds, getPathGeometryBounds, distanceToPathSegment, angleOnArc })');
 const triangle = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/triangleObstacle.js'), 'utf8',
 ).replace(/export (const|function) /g, '$1 ') +
@@ -23,11 +23,15 @@ const rectangularWall = vm.runInNewContext(fs.readFileSync(
 const componentAppearance = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/componentAppearance.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
-  '\n;({RECTANGULAR_OBSTACLE_TYPE,CIRCULAR_OBSTACLE_TYPE,OBSTACLE_COMPONENT_TYPES,MIN_CIRCLE_RADIUS,getCircleRadius,RESIZABLE_COMPONENT_TYPES,DEFAULT_COMPONENT_SHADOW_COLORS,DEFAULT_COMPONENT_SIZES,getDefaultShadowColor})', {...triangle, ...rectangularWall});
+  '\n;({RECTANGULAR_OBSTACLE_TYPE,CIRCULAR_OBSTACLE_TYPE,OBSTACLE_COMPONENT_TYPES,MIN_CIRCLE_RADIUS,getCircleRadius,RESIZABLE_COMPONENT_TYPES,RESIZABLE_COMPONENT_TYPES_WITHOUT_PORTS,PRODUCTION_COMPONENT_TYPES,DEFAULT_COMPONENT_SHADOW_COLORS,DEFAULT_COMPONENT_SIZES,getDefaultShadowColor})', {...triangle, ...rectangularWall});
 const stations = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/stations.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export const /g, 'const ') +
   '\n;({ STATION_TYPES, DEFAULT_STATION_SIZE, getStationType, getNextStationIndex, getComponentBounds, getComponentCenter, getComponentFootprint, getComponentQuarterTurns })', {...triangle, ...componentAppearance, ...rectangularWall});
+const agvConfiguration = vm.runInNewContext(fs.readFileSync(
+  path.resolve(__dirname, '../src/utils/agvConfiguration.js'), 'utf8',
+).replace(/^import .*;\r?$/gm, '').replace(/export (const|function) /g, '$1 ') +
+  '\n;({AGV_CONFIGURATION_TYPE,DEFAULT_AGV_DIMENSIONS,DEFAULT_AGV_SPEED,DUPLICATE_AGV_CONFIGURATION_MESSAGE,findAgvConfiguration,getAgvDimensions,getAgvParkingStations,getAgvParkingGrid,getAgvParkingCapacity,isValidAgvRange,parseAgvRange,getAgvRowsError})', stations);
 const canvasBoundaryUtils = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/canvasBoundary.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') +
@@ -49,7 +53,7 @@ const alignBounds = vm.runInNewContext(fs.readFileSync(
 const inputRules = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/inputRules.js'), 'utf8',
 ).replace(/export (const|function) /g, '$1 ') +
-  '\n;({INPUT_ENTITY_TYPES,getInputType,getInputRuleCategory,INPUT_PROPERTY_DEFAULTS,isValidInputProperty,parseGenerationInterval,formatGenerationInterval,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
+  '\n;({INPUT_ENTITY_TYPES,getInputType,getInputRuleCategory,INPUT_PROPERTY_DEFAULTS,INPUT_RULE_DEFAULT_DIMENSIONS,isValidInputProperty,parseGenerationInterval,formatGenerationInterval,getInputRuleValidationMessage,sampleInputRule,getDefaultWorkpieceDimensions})');
 const workstationProperties = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/workstationProperties.js'), 'utf8',
 ).replace(/export (const|function) /g, '$1 ') +
@@ -76,7 +80,7 @@ const createInputSimulation = vm.runInNewContext(fs.readFileSync(
 const connectionGeometry = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/connectionLine.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export (const|function) /g, '$1 ') +
-  '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry,getPointOnConnection,getConnectionSegmentMove})', {...stations, ...componentPorts, ...agvGeometry});
+  '\n;({DEFAULT_WORKPIECE_SPEED,getConnectionGeometry,getEditableRouteGeometry,getPointOnConnection,getConnectionSegmentMove})', {...stations, ...componentAppearance, ...componentPorts, ...agvGeometry});
 const hasWallRouteCollision = vm.runInNewContext(fs.readFileSync(
   path.resolve(__dirname, '../src/utils/wallRoutes.js'), 'utf8',
 ).replace(/^import .*;\r?$/gm, '').replace(/export function /g, 'function ') + '\n;hasWallRouteCollision',
@@ -136,6 +140,7 @@ function createCanvas(items = [], onPlacementDone, handlers = {}) {
   let resize;
   const sandbox = {
     ...agvGeometry,
+    ...agvConfiguration,
     ...stations,
     ...canvasBoundaryUtils,
     ...componentCollision,
@@ -164,10 +169,10 @@ function createCanvas(items = [], onPlacementDone, handlers = {}) {
   };
   const script = descriptor.scriptSetup.content.replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?$/gm, '');
   const exports = `({ canvas, canvasContainer, ppm, viewOrigin, canvasWidth, canvasHeight,
-    alignmentGuides, cursorX, cursorY, cursorStyle,
+    alignmentGuides, cursorX, cursorY, cursorStyle, showCursor,
     metersPerCell, panning, selectionBox, isComponentSelected, imageCache, handleWheel, resetZoom, focusComponent,
-    handleMouseDown, handleMouseMove, handleMouseUp, handleMouseEnter, handleMouseLeave,
-    handleCanvasKeyDown, handlePointerCancel, handleWindowBlur, getCanvasMousePosition, undoDraftPoint, finishCanvasDrag,
+    handleMouseDown, handleMouseMove, handleMouseUp, handleMouseEnter, handleMouseLeave, handleDoubleClick,
+    handleCanvasKeyDown, handleCanvasContextMenu, handlePointerCancel, handleWindowBlur, getCanvasMousePosition, undoDraftPoint, finishCanvasDrag,
     drawGridNow, drawWorkpieces, hitTestWorkpiece, workpieceTooltipAnchor, dragging, draggingCorner, editingId, labelRects, labelEditorStyle,
     hitTestComponent, hitTestLabel, connectionScreenPoint, hitTestConnectionLine, hitTestAGVPath,
   })`;
@@ -365,14 +370,17 @@ test('a pure quarter-circle AGV area has annular bounds and tangent directions i
 
 test('AGV arc radius limits account for sharp turns, duplicate points and neighboring arcs', () => {
   const nodes = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 1 }];
-  const maxRadius = agvGeometry.getCornerMaxRadius(nodes, 0);
+  const maxRadius = agvGeometry.getPathParameters(nodes, {}).rows[1].maxRadius;
   assert.ok(maxRadius > 0 && maxRadius < 1);
   const arc = agvGeometry.buildPathGeometry({ nodes, cornerRadii: [100] }).find((s) => s.type === 'arc');
   near(arc.radius, maxRadius);
-  assert.equal(agvGeometry.getCornerMaxRadius([{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 2, y: 2 }], 0), 0);
+  const duplicate = [{ x: 0, y: 0 }, { x: 0, y: 0 }, { x: 2, y: 2 }];
+  assert.equal(agvGeometry.getPathParameters(duplicate, {}).rows[1].maxRadius, 0);
   const shared = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 20, y: 10 }];
-  near(agvGeometry.getCornerMaxRadius(shared, 0), 5);
-  near(agvGeometry.getCornerMaxRadius(shared, 1), 5);
+  const {rows} = agvGeometry.getPathParameters(shared, {cornerRadii: [8, 100]});
+  near(rows[1].maxRadius, 8);
+  near(rows[3].maxRadius, 2);
+  near(rows[2].length, 0);
   const curve = agvGeometry.buildPathGeometry({ nodes: shared, cornerRadii: [100, 100] });
   assert.ok(curve.every((s) => Number.isFinite(s.length) && s.length > 0));
 });
@@ -413,6 +421,236 @@ test('AGV area rendering scales width, reverses arrow direction and fits the ful
   assert.ok(upper.clientY >= 100 && lower.clientY <= 700);
 });
 
+test('AGV configuration uses its default or custom fill with and without a route', (t) => {
+  const config = {id: 'config', type: 'AGVconfiguration', x: 4, y: 5, width: 3, height: 3};
+  const canvas = createCanvas([config]);
+  t.after(() => canvas.dispose());
+  const ctx = canvas.element.getContext('2d');
+  const scale = canvas.api.ppm.value;
+  let renderedColor;
+  let fillStyle;
+  Object.defineProperty(ctx, 'fillStyle', {
+    get: () => fillStyle,
+    set: value => { if (typeof value === 'string') fillStyle = value; },
+  });
+  ctx.fillRect = (x, y, width, height) => {
+    if (x === 4 * scale && y === -8 * scale && width === 3 * scale && height === 3 * scale) renderedColor = ctx.fillStyle;
+  };
+  const defaultColor = componentAppearance.getDefaultShadowColor(config.type);
+  canvas.api.drawGridNow();
+  const before = renderedColor;
+  canvas.props.placedComponents.push({id: 'route', type: 'AGVpath', nodes: [{x: 0, y: 0}, {x: 8, y: 0}]});
+  canvas.api.drawGridNow();
+  assert.equal(renderedColor, defaultColor);
+  assert.equal(before, defaultColor);
+  canvas.props.placedComponents[0].shadowColor = '#123456';
+  canvas.api.drawGridNow();
+  assert.equal(renderedColor, '#123456');
+});
+
+test('AGV configuration is a singleton and disabled endurance resets to unlimited', async (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, logs, handleComponentPlaced, handleUpdateComponentProperties');
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {
+    'component-placed': workspace.handleComponentPlaced,
+  });
+  t.after(() => canvas.dispose());
+  canvas.props.activeControl = {type: 'AGVconfiguration', name: 'AGV配置', icon: 'AGVconfiguration.svg'};
+  await vue.nextTick();
+  await canvas.api.handleMouseDown(canvas.pointer(0, 0));
+  const [config] = workspace.placedComponents.value;
+  assert.equal(config.type, 'AGVconfiguration');
+  assert.equal(config.agvRows.length, 0);
+  await canvas.api.handleMouseDown(canvas.pointer(8, 0));
+  assert.equal(workspace.placedComponents.value.length, 1);
+  assert.ok(canvas.events.some(event => event.type === 'add-log' && event.value.includes('只能有一个 AGV')));
+  workspace.handleComponentPlaced({...config, id: 'agv-second', x: 10});
+  assert.equal(workspace.placedComponents.value.length, 1);
+  assert.match(workspace.logs.value.at(-1), /只能有一个 AGV/);
+
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: config}),
+    defineEmits: () => (_, value) => workspace.handleUpdateComponentProperties(value),
+  }, 'agvRangeText, handleAgvRangeChange');
+  const setRange = value => panel.handleAgvRangeChange({target: {value}});
+  assert.equal(config.agvRangeEnabled, false);
+  assert.equal(panel.agvRangeText.value, '∞');
+  setRange('800');
+  assert.equal(panel.agvRangeText.value, '∞');
+  workspace.handleUpdateComponentProperties({id: config.id, agvRangeEnabled: true});
+  assert.equal(panel.agvRangeText.value, '∞');
+  setRange('800.25');
+  setRange('-12');
+  assert.equal(config.agvRange, 800.25);
+  setRange('∞');
+  assert.equal(config.agvRange, null);
+  setRange('800');
+  workspace.handleUpdateComponentProperties({id: config.id, agvRangeEnabled: false});
+  assert.equal(config.agvRange, null);
+  assert.equal(panel.agvRangeText.value, '∞');
+});
+
+test('saved AGV rows draw four-wheel vehicles in separate slots at their station scale and orientation', (t) => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, openDialog, saveDialog');
+  workspace.placedComponents.value.push(
+    {id: 'config', type: 'AGVconfiguration', x: -3, y: -2, width: 1, height: 1},
+    {id: 'parking', type: 'node', x: 2, y: 1, width: 3.6, height: 2, quarterTurns: 1},
+  );
+  const canvas = createCanvas(workspace.placedComponents.value);
+  t.after(() => canvas.dispose());
+  const ctx = canvas.element.getContext('2d');
+  const plates = [], decks = [], wheels = [], frontMarks = [], rotations = [], translations = [];
+  ctx.rotate = angle => rotations.push(angle);
+  ctx.translate = (x, y) => translations.push([x, y]);
+  ctx.fillRect = (x, y, width, height) => {
+    if (ctx.fillStyle === '#d97706') plates.push({x, y, width, height});
+    if (ctx.fillStyle === '#374151') wheels.push({x, y, width, height});
+    if (ctx.fillStyle === '#fde68a') decks.push({x, y, width, height});
+    if (ctx.fillStyle === '#991b1b') frontMarks.push({x, y, width, height});
+  };
+  canvas.api.drawGridNow();
+  assert.equal(plates.length, 0);
+
+  const dialog = {itemId: 'config', dialogType: 'agv-configuration'};
+  workspace.openDialog(dialog);
+  workspace.saveDialog({...dialog, agvRows: [{stationId: 'parking', count: 4,
+    length: 1200, width: 800, emptySpeed: 1, loadedSpeed: 1}]});
+  for (const scale of [10, 40]) {
+    canvas.api.ppm.value = scale;
+    canvas.api.viewOrigin.value = {x: -5, y: 5};
+    plates.length = 0; wheels.length = 0; rotations.length = 0; translations.length = 0;
+    decks.length = 0; frontMarks.length = 0;
+    canvas.api.drawGridNow();
+    assert.equal(plates.length, 4);
+    assert.equal(wheels.length, 16);
+    assert.equal(decks.length, 4);
+    assert.equal(frontMarks.length, 8);
+    assert.deepEqual(rotations, [Math.PI / 2]);
+    assert.deepEqual(translations.at(-1), [2 * scale, -scale]);
+    for (const [i, plate] of plates.entries()) {
+      near(plate.width / scale, 1.2);
+      near(plate.height / scale, 0.64);
+      near((plate.x + plate.width / 2) / scale, i % 2 === 0 ? -0.9 : 0.9);
+      near((plate.y + plate.height / 2) / scale, i < 2 ? -0.5 : 0.5);
+      const deck = decks[i];
+      const front = plate.x + plate.width;
+      const deckFront = deck.x + deck.width;
+      near(front - deckFront, (deck.x - plate.x) * 1.5);
+      const [upperMark, lowerMark] = frontMarks.slice(i * 2, i * 2 + 2);
+      near(upperMark.x, lowerMark.x);
+      assert.ok(upperMark.x > deckFront && upperMark.x + upperMark.width < front);
+      near((upperMark.y + lowerMark.y + upperMark.height) / 2, plate.y + plate.height / 2);
+      for (const wheel of wheels.slice(i * 4, i * 4 + 4)) {
+        near(wheel.width / scale, 0.192);
+        near(wheel.height / scale, 0.08);
+      }
+    }
+  }
+
+  // 站点深度只够一排时，四辆车仍要放在各自的车位。
+  const parking = workspace.placedComponents.value[1];
+  parking.width = 4.8;
+  parking.height = 0.8;
+  plates.length = 0;
+  canvas.api.drawGridNow();
+  assert.equal(plates.length, 4);
+  for (const [index, plate] of plates.entries()) {
+    near(plate.x / canvas.api.ppm.value, -2.4 + index * 1.2);
+    near((plate.y + plate.height / 2) / canvas.api.ppm.value, 0);
+  }
+
+  workspace.openDialog(dialog);
+  workspace.saveDialog({...dialog, agvRows: []});
+  plates.length = 0;
+  canvas.api.drawGridNow();
+  assert.equal(plates.length, 0);
+});
+
+test('AGV rows accept unique parking stations, available capacity and positive speeds', () => {
+  const workspace = loadComponent('WorkspaceLayout', {getComponentLabel: item => item.id},
+    'placedComponents, activeDialog, openDialog, saveDialog, handleUpdateComponentProperties, handleRemoveComponent');
+  workspace.placedComponents.value.push(
+    {id: 'config', type: 'AGVconfiguration', agvRows: []},
+    {id: 'parking1', type: 'node', stationType: 'parking', x: -8, y: 0},
+    {id: 'parking2', type: 'node', stationType: 'parking', x: 8, y: 0, width: 1.8, height: 1.4},
+    {id: 'small', type: 'node', stationType: 'parking', x: 0, y: 8, width: 0.8, height: 1.4},
+    {id: 'charge', type: 'node', stationType: 'charging', x: 0, y: -8},
+  );
+  const [config, parking1, parking2] = workspace.placedComponents.value;
+  const dialogType = 'agv-configuration';
+  const openEditor = () => {
+    workspace.openDialog({itemId: config.id, dialogType});
+    return loadComponent('Dialog', {
+      defineProps: () => ({item: config, dialogType, placedComponents: workspace.placedComponents.value}),
+      defineEmits: () => (event, payload) => {
+        if (event === 'save') workspace.saveDialog(payload);
+        if (event === 'close') workspace.activeDialog.value = null;
+      },
+      systemInputIcon: '',
+    }, 'agvRows, agvCapacities, availableAgvStations, setAgvStation, addAgvRow, deleteAgvRow, saveAgvRows, agvRowsError, emit');
+  };
+  const editor = openEditor();
+  editor.addAgvRow();
+  assert.match(editor.agvRowsError.value, /停靠站点/);
+  const [row] = editor.agvRows.value;
+  assert.deepEqual(Array.from(editor.availableAgvStations(row), station => station.id), ['parking1', 'parking2', 'small']);
+  editor.setAgvStation(row, parking1.id);
+  assert.deepEqual([row.count, row.length, row.width, row.emptySpeed, row.loadedSpeed], [1, 900, 700, 1, 1]);
+  assert.equal(editor.agvCapacities.value[0], 12);
+  row.count = 13;
+  assert.match(editor.agvRowsError.value, /1 至 12/);
+  row.count = 12;
+  row.length = 1500;
+  assert.equal(editor.agvCapacities.value[0], 8);
+  assert.match(editor.agvRowsError.value, /1 至 8/);
+  row.length = 900;
+  row.width = '';
+  assert.match(editor.agvRowsError.value, /长、宽都须大于 0/);
+  row.width = 700;
+  row.loadedSpeed = 0;
+  editor.saveAgvRows();
+  assert.equal(config.agvRows.length, 0);
+  row.loadedSpeed = 1.2;
+  editor.addAgvRow();
+  const other = editor.agvRows.value[1];
+  assert.deepEqual(Array.from(editor.availableAgvStations(other), station => station.id), ['parking2', 'small']);
+  editor.setAgvStation(other, parking1.id);
+  assert.match(editor.agvRowsError.value, /已被选用/);
+  editor.setAgvStation(other, parking2.id);
+  assert.equal(editor.agvCapacities.value[1], 4);
+  other.length = 600;
+  other.count = 4;
+  assert.equal(editor.agvCapacities.value[1], 6);
+  editor.saveAgvRows();
+  assert.equal(workspace.activeDialog.value, null);
+  assert.deepEqual(Array.from(config.agvRows, item => [item.stationId, item.count, item.length, item.width]),
+    [['parking1', 12, 900, 700], ['parking2', 4, 600, 700]]);
+
+  delete config.agvRows[0].length;
+  delete config.agvRows[0].width;
+  const editAgain = openEditor();
+  assert.deepEqual([editAgain.agvRows.value[0].length, editAgain.agvRows.value[0].width], [900, 700]);
+  editAgain.setAgvStation(editAgain.agvRows.value[1], 'small');
+  assert.equal(editAgain.agvCapacities.value[1], 2);
+  editAgain.agvRows.value[1].length = 900;
+  assert.equal(editAgain.agvCapacities.value[1], 0);
+  assert.match(editAgain.agvRowsError.value, /放不下/);
+  editAgain.addAgvRow();
+  editAgain.deleteAgvRow();
+  editAgain.emit('close');
+  assert.equal(config.agvRows[1].stationId, parking2.id);
+  workspace.handleUpdateComponentProperties({id: parking1.id, width: 1});
+  assert.equal(parking1.width, undefined, 'shrinking cannot make the configured count exceed capacity');
+  workspace.handleUpdateComponentProperties({id: parking2.id, width: 1.2});
+  assert.equal(parking2.width, 1.2, 'resizing checks the configured vehicle dimensions');
+  workspace.handleUpdateComponentProperties({id: parking2.id, width: 1.1});
+  assert.equal(parking2.width, 1.2);
+  workspace.handleUpdateComponentProperties({id: parking2.id, stationType: 'charging'});
+  assert.equal(config.agvRows.length, 1);
+  workspace.handleRemoveComponent(parking1.id);
+  assert.equal(config.agvRows.length, 0);
+});
+
 test('AGV properties change width, reverse endpoints, and keep station links working', () => {
   const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties, handleUpdateComponentPosition');
   workspace.placedComponents.value.push(
@@ -439,7 +677,7 @@ test('AGV properties change width, reverse endpoints, and keep station links wor
   near(route.nodes[2].x, -1); near(route.nodes[2].y, -2);
 });
 
-test('AGV path drawing creates straight corridors and can undo a draft waypoint', async (t) => {
+test('AGV path drawing can cancel at a station or undo one draft waypoint', async (t) => {
   const stationsAt = [
     { id: 'start', type: 'node', name: '停靠站点', index: 1, x: 0, y: 0, width: 3, height: 3 },
     { id: 'end', type: 'node', name: '停靠站点', index: 2, x: 10, y: 10, width: 3, height: 3 },
@@ -448,6 +686,15 @@ test('AGV path drawing creates straight corridors and can undo a draft waypoint'
   c.props.activeControl = { type: 'AGVpath', name: 'AGV路径', icon: 'AGVpath.svg' };
   await vue.nextTick();
   assert.doesNotMatch(descriptor.template.content, /agvDrawingMode|arcDrawingRadius|圆弧/);
+  await c.api.handleMouseDown(c.pointer(0, 0));
+  await c.api.handleMouseDown(c.pointer(10, 0));
+  let contextMenuSuppressed = false;
+  await c.api.handleMouseDown(c.pointer(10, 10, {button: 2}));
+  c.api.handleCanvasContextMenu({preventDefault() { contextMenuSuppressed = true; }});
+  assert.equal(contextMenuSuppressed, true);
+  assert.equal(c.api.undoDraftPoint(), false);
+  assert.equal(c.props.placedComponents.length, 2);
+  assert.ok(c.events.some(event => event.type === 'add-log' && event.value.includes('已取消当前绘制')));
   await c.api.handleMouseDown(c.pointer(0, 0));
   await c.api.handleMouseDown(c.pointer(10, 0));
   await c.api.handleMouseDown(c.pointer(12, 5));
@@ -462,8 +709,10 @@ test('AGV path drawing creates straight corridors and can undo a draft waypoint'
 });
 
 test('ordinary connection lines reject stations at both endpoints and still connect components', async (t) => {
+  const station = { id: 'station', type: 'node', name: '停靠站点', index: 1, x: 0, y: 0, width: 3, height: 3,
+    loadPoint: {x: -1.5, y: 0}, unloadPoint: {x: 1.5, y: 0} };
   const c = createCanvas([
-    { id: 'station', type: 'node', name: '停靠站点', index: 1, x: 0, y: 0, width: 3, height: 3 },
+    station,
     buffer({ id: 'machine-a', x: 9, y: -1.5 }),
     buffer({ id: 'machine-b', x: 18, y: -1.5 }),
   ]); t.after(() => c.dispose());
@@ -477,6 +726,16 @@ test('ordinary connection lines reject stations at both endpoints and still conn
   const line = c.props.placedComponents.find((item) => item.type === 'connectionLine');
   assert.ok(line);
   assert.equal(line.fromId, 'machine-a'); assert.equal(line.toId, 'machine-b');
+  for (const type of ['node', 'rectangularObstacle', 'AGVconfiguration', 'createScript']) {
+    const item = {...station, id: type, type};
+    const components = [...c.props.placedComponents, item];
+    assert.ok(componentAppearance.RESIZABLE_COMPONENT_TYPES.has(type));
+    assert.equal(componentPorts.getComponentPorts(item).length, 0);
+    assert.equal(componentPorts.getComponentPortPosition(item, 'loadPoint'), null);
+    assert.equal(componentPorts.getComponentPortPosition(item, 'unloadPoint'), null);
+    assert.equal(connectionGeometry.getConnectionGeometry({...line, fromId: item.id}, components), null);
+    assert.equal(connectionGeometry.getConnectionGeometry({...line, toId: item.id}, components), null);
+  }
   assert.ok(c.events.some((event) => event.type === 'add-log' && event.value.includes('不能连接站点')));
 });
 
@@ -990,6 +1249,34 @@ test('box selection cancels on Escape or pointer cancellation and a blank click 
   assert.ok(c.api.ppm.value > scale);
 });
 
+test('Escape returns a pending placement to selection and clears its preview', async (t) => {
+  const item = buffer({x: 1, y: 1});
+  const canvas = createCanvas([item], () => { canvas.props.activeControl = {type: 'select'}; });
+  t.after(() => canvas.dispose());
+  const tool = {type: 'buffer', name: '缓冲区', icon: 'buffer.svg'};
+  canvas.props.selectedId = item.id;
+  canvas.props.selectedIds = [item.id];
+  canvas.props.activeControl = tool;
+  await vue.nextTick();
+  canvas.api.handleMouseMove(canvas.pointer(-8, 0));
+  assert.equal(canvas.api.showCursor.value, true);
+  canvas.api.handleCanvasKeyDown({key: 'Escape', target: {closest: () => true}});
+  assert.equal(canvas.props.activeControl.type, 'buffer');
+  canvas.api.handleCanvasKeyDown({key: 'Escape'});
+  await vue.nextTick();
+  assert.equal(canvas.props.activeControl.type, 'select');
+  assert.equal(canvas.api.showCursor.value, false);
+  assert.deepEqual([...canvas.props.selectedIds], [item.id]);
+
+  canvas.props.activeControl = tool;
+  await vue.nextTick();
+  const pendingPlacement = canvas.api.handleMouseDown(canvas.pointer(-8, 0));
+  canvas.api.handleCanvasKeyDown({key: 'Escape'});
+  await pendingPlacement;
+  assert.equal(canvas.props.activeControl.type, 'select');
+  assert.deepEqual(Array.from(canvas.props.placedComponents, component => component.id), [item.id]);
+});
+
 test('middle-button panning preserves a multi-selection and never creates a selection rectangle', async (t) => {
   const c = createCanvas([buffer(), buffer({ id: 'second', x: 20 })]); t.after(() => c.dispose());
   c.props.selectedIds = ['component-1', 'second']; c.props.selectedId = 'component-1';
@@ -1182,12 +1469,73 @@ test('Y-up rendering keeps labels, editing positions and connection hit tests al
   assert.equal(c.api.hitTestConnectionLine(line, 0, 0), true);
 });
 
+test('double-clicking production components opens their properties and keeps nested editors independent', async (t) => {
+  const types = ['systemInput', 'systemOutput', 'workstation', 'parallelWorkstation', 'assemblyWorkstation', 'disassemblyWorkstation', 'buffer'];
+  const workspace = loadComponent('WorkspaceLayout', {getComponentLabel: item => item.id},
+    'placedComponents, componentPropertiesItem, openComponentProperties, activeDialog, openDialog, saveDialog, handleRemoveComponent');
+  workspace.placedComponents.value.push(...types.map((type, index) =>
+    buffer({id: type, type, name: '组件', x: index * 5 - 1.5, y: -1.5})),
+    {id: 'parking', type: 'node', x: 35, y: 0});
+  const canvas = createCanvas(workspace.placedComponents.value, undefined, {
+    'open-component-properties': workspace.openComponentProperties,
+  });
+  t.after(() => canvas.dispose());
+
+  for (const [index, type] of types.entries()) {
+    canvas.api.handleDoubleClick(canvas.pointer(index * 5, 0));
+    assert.equal(workspace.componentPropertiesItem.value.id, type);
+  }
+  canvas.api.handleDoubleClick(canvas.pointer(35, 0));
+  assert.equal(workspace.componentPropertiesItem.value.id, 'buffer');
+  canvas.props.activeControl = {type: 'AGVpath'};
+  await vue.nextTick();
+  canvas.api.handleDoubleClick(canvas.pointer(0, 0));
+  assert.equal(workspace.componentPropertiesItem.value.id, 'buffer');
+  canvas.props.activeControl = {type: 'select'};
+  await vue.nextTick();
+
+  canvas.api.drawGridNow();
+  const label = canvas.api.labelRects.get('systemInput');
+  canvas.api.handleDoubleClick(canvas.pointer(label.x + label.width / 2, label.y + label.height / 2));
+  assert.equal(canvas.api.editingId.value, 'systemInput');
+  assert.equal(workspace.componentPropertiesItem.value.id, 'buffer');
+
+  canvas.api.handleDoubleClick(canvas.pointer(0, 0));
+  const input = workspace.componentPropertiesItem.value;
+  const dialog = {itemId: input.id, dialogType: 'input-rule'};
+  workspace.openDialog(dialog);
+  assert.equal(workspace.activeDialog.value.dialogType, 'input-rule');
+  assert.equal(workspace.componentPropertiesItem.value, input);
+  workspace.saveDialog({...dialog, properties: {inputRuleRows: [{partType: 'A', relativeWeight: 100}]}});
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(workspace.componentPropertiesItem.value, input);
+  assert.equal(input.inputRuleRows[0].partType, 'A');
+  workspace.handleRemoveComponent(input.id);
+  assert.equal(workspace.componentPropertiesItem.value, undefined);
+});
+
+test('the component properties window starts on basic settings and moves focus between tabs with the keyboard', () => {
+  const focused = [];
+  const dialog = loadComponent('ComponentPropertiesDialog', {
+    defineProps: () => ({item: {type: 'systemOutput'}}), useId: () => 'properties',
+    document: {getElementById: id => ({focus: () => focused.push(id)})},
+  }, 'tabs, activeTab, moveTabFocus');
+  assert.deepEqual(Array.from(dialog.tabs, tab => tab.label), ['基本属性', '呼叫AGV']);
+  assert.equal(dialog.activeTab.value, 'basic');
+  dialog.moveTabFocus({key: 'ArrowRight', preventDefault() {}}, 0);
+  assert.equal(dialog.activeTab.value, 'call-agv');
+  dialog.moveTabFocus({key: 'Home', preventDefault() {}}, 1);
+  assert.equal(dialog.activeTab.value, 'basic');
+  assert.deepEqual(focused, ['properties-call-agv-tab', 'properties-basic-tab']);
+});
+
 function loadComponent(name, bindings, exposed) {
   const file = path.resolve(__dirname, `../src/components/${name}.vue`);
   const script = parse(fs.readFileSync(file, 'utf8')).descriptor.scriptSetup.content
     .replace(/^import[\s\S]*?from\s+['"][^'"]+['"];?\r?$/gm, '');
   return vm.runInNewContext(`${script}\n;({ ${exposed} })`, {
     ...agvGeometry,
+    ...agvConfiguration,
     ...stations,
     ...canvasBoundaryUtils,
     ...componentCollision,
@@ -2233,6 +2581,8 @@ test('input type is saved per input without changing its rule categories', () =>
   assert.equal(first.inputType, 'Vehicle');
   assert.equal(second.inputType, 'Workpiece');
   assert.equal(first.inputRuleRows[0].partType, 'Workpiece');
+  assert.equal(first.inputRuleRows[0].length, 500);
+  assert.equal(first.inputRuleRows[0].width, 400);
   workspace.handleUpdateComponentProperties({id: first.id, inputType: 'AGV'});
   assert.equal(first.inputType, 'Vehicle');
 });
@@ -2749,30 +3099,107 @@ test('the floating radius editor stays with its corner and can consume the full 
   assert.deepEqual({...rows()[1].point}, {x: 8, y: 0});
 });
 
-test('lengths and angles edit the chosen waypoint while keeping the two component ports fixed', () => {
-  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, handleUpdateComponentProperties');
-  workspace.placedComponents.value.push(buffer({id: 'from', x: -1.5, y: -1.5}), buffer({id: 'to', x: 18.5, y: 8.5}),
+test('connection segment edits follow the chosen side and move components with their local ports', () => {
+  const workspace = loadComponent('WorkspaceLayout', {}, 'placedComponents, finiteCanvas, handleUpdateComponentProperties');
+  workspace.finiteCanvas.value = {enabled: true, length: 60, width: 40};
+  workspace.placedComponents.value.push(
+    buffer({id: 'from', x: -1.5, y: -1.5, unloadPoint: {x: 1, y: 0}}),
+    buffer({id: 'to', x: 18.5, y: 8.5, loadPoint: {x: -1, y: 0}}),
     {id: 'line', type: 'connectionLine', fromId: 'from', toId: 'to', affectedEndpoint: 'from',
       waypoints: [{x: 8, y: 0}, {x: 8, y: 10}], cornerRadii: [2, 1]});
-  const line = workspace.placedComponents.value[2];
+  const [from, to, line] = workspace.placedComponents.value;
   const route = () => connectionGeometry.getConnectionGeometry(line, workspace.placedComponents.value);
   const edit = (index, fields) => workspace.handleUpdateComponentProperties({id: line.id, connectionSegment: {index, ...fields}});
+  const initialLength = route().rows[0].length;
+  edit(0, {length: 200});
+  near(route().rows[0].length, initialLength);
+  near(from.x, -1.5);
   edit(0, {length: 4});
-  assert.equal(line.affectedEndpoint, 'to');
+  assert.equal(line.affectedEndpoint, 'from');
   near(route().rows[0].length, 4);
   assert.equal(route().rows[0].angle, 0);
+  near(from.x, -0.5);
+  assert.deepEqual({...from.unloadPoint}, {x: 1, y: 0});
+  assert.deepEqual({...line.waypoints[0]}, {x: 8, y: 0});
   assert.deepEqual({...line.waypoints[1]}, {x: 8, y: 10});
   const lastLength = route().rows[4].length;
+  workspace.handleUpdateComponentProperties({id: line.id, affectedEndpoint: 'to'});
   edit(2, {angle: 30});
-  assert.equal(line.affectedEndpoint, 'from');
+  assert.equal(line.affectedEndpoint, 'to');
   near(route().rows[4].angle, 30);
   near(route().rows[4].length, lastLength);
-  const second = {...line.waypoints[1]};
+  assert.notEqual(to.y, 8.5);
+  assert.deepEqual({...to.loadPoint}, {x: -1, y: 0});
+  assert.deepEqual({...line.waypoints[1]}, {x: 8, y: 10});
+  const end = {...route().end};
   edit(1, {length: 5});
   near(route().rows[2].length, 5);
-  assert.deepEqual({...line.waypoints[1]}, second);
-  assert.deepEqual({...route().start}, {x: 0, y: 0});
-  assert.deepEqual({...route().end}, {x: 20, y: 10});
+  assert.deepEqual({...line.waypoints[0]}, {x: 8, y: 0});
+  assert.notEqual(line.waypoints[1].y, 10);
+  near(route().start.x, 2);
+  assert.deepEqual({...route().end}, end);
+});
+
+test('the shared parameter editor changes AGV waypoints and drawn arcs while keeping station links', () => {
+  const workspace = loadComponent('WorkspaceLayout', {},
+    'placedComponents, openDialog, activeDialog, dialogItem, dialogConnectionCorner, saveDialog, handleUpdateComponentProperties');
+  workspace.placedComponents.value.push(
+    {id: 'start', type: 'node', x: 0, y: 0}, {id: 'end', type: 'node', x: 20, y: 10},
+    {id: 'route', type: 'AGVpath', fromId: 'start', toId: 'end', affectedEndpoint: 'from',
+      nodes: [{x: 0, y: 0}, {x: 8, y: 0}, {x: 20, y: 10}]},
+  );
+  const [start, end, route] = workspace.placedComponents.value;
+  const panel = loadComponent('PropertyPanel', {
+    defineProps: () => ({selectedItem: route, placedComponents: workspace.placedComponents.value}),
+    defineEmits: () => (event, update) => {
+      if (event === 'open-dialog') workspace.openDialog(update);
+      if (event === 'update-component-properties') workspace.handleUpdateComponentProperties(update);
+    },
+  }, 'connectionGeometry, connectionCellEdit, startConnectionCellEdit, saveConnectionCellEdit, openConnectionRadius');
+  const rows = () => panel.connectionGeometry.value.rows;
+  panel.startConnectionCellEdit(rows()[0], 'length');
+  panel.connectionCellEdit.value.value = '10';
+  panel.saveConnectionCellEdit();
+  near(rows()[0].length, 10);
+  assert.equal(route.affectedEndpoint, 'from');
+  assert.deepEqual({x: start.x, y: start.y}, {x: -2, y: 0});
+  assert.deepEqual({...route.nodes[1]}, {x: 8, y: 0});
+  workspace.handleUpdateComponentProperties({id: route.id, affectedEndpoint: 'to'});
+  panel.startConnectionCellEdit(rows()[2], 'angle');
+  panel.connectionCellEdit.value.value = '90';
+  panel.saveConnectionCellEdit();
+  near(rows()[2].angle, 90);
+  assert.equal(route.affectedEndpoint, 'to');
+  near(end.x, 8);
+  near(end.y, Math.hypot(12, 10));
+  assert.deepEqual({...route.nodes[1]}, {x: 8, y: 0});
+  assert.deepEqual({...route.nodes[0]}, {x: start.x, y: start.y});
+  assert.deepEqual({...route.nodes[2]}, {x: end.x, y: end.y});
+
+  panel.openConnectionRadius(rows()[1]);
+  const dialog = loadComponent('Dialog', {
+    defineProps: () => ({item: workspace.dialogItem.value, dialogType: workspace.activeDialog.value.dialogType,
+      connectionCorner: workspace.dialogConnectionCorner.value}),
+    defineEmits: () => (event, payload) => { if (event === 'save') workspace.saveDialog(payload); },
+    window: {innerWidth: 1280, innerHeight: 800}, systemInputIcon: '',
+  }, 'isConnectionRadiusEditor, radiusDraft, saveConnectionRadius');
+  assert.equal(dialog.isConnectionRadiusEditor.value, true);
+  dialog.radiusDraft.value = 3;
+  dialog.saveConnectionRadius();
+  assert.equal(workspace.activeDialog.value, null);
+  assert.equal(rows()[1].type, 'Arc');
+  const drawn = agvGeometry.buildPathGeometry(route);
+  near(drawn.find(segment => segment.type === 'arc').radius, 3);
+  near(drawn.reduce((sum, segment) => sum + segment.length, 0), panel.connectionGeometry.value.length);
+
+  workspace.placedComponents.value.push({id: 'straight', type: 'AGVpath', fromId: start.id, toId: end.id,
+    nodes: [{x: start.x, y: start.y}, {x: end.x, y: end.y}]});
+  workspace.handleUpdateComponentProperties({id: 'straight', affectedEndpoint: 'from'});
+  workspace.handleUpdateComponentProperties({id: 'straight', connectionSegment: {index: 0, length: 15, angle: 0}});
+  assert.deepEqual({x: start.x, y: start.y}, {x: end.x - 15, y: end.y});
+  near(end.x, 8);
+  near(end.y, Math.hypot(12, 10));
+  assert.deepEqual({...route.nodes[0]}, {x: start.x, y: start.y});
 });
 
 test('editing connection length or angle moves only its endpoint and speed is stored independently', () => {
